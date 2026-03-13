@@ -1,0 +1,822 @@
+"""图片生成服务。
+
+处理与 NovelAI 官方 API 的交互逻辑，包含防 429 封号的任务队列机制、
+Vibe 参考图传递等核心功能。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import random
+import time
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional
+
+import aiohttp
+from PIL import Image
+
+from src.app.plugin_system.api.log_api import get_logger
+from src.core.components.base.service import BaseService
+from src.kernel.concurrency import get_task_manager
+
+if TYPE_CHECKING:
+    from plugins.image_generator_plugin.config import ImageGeneratorConfig
+    from src.core.components.base.plugin import BasePlugin
+
+logger = get_logger("image_generator_plugin.service")
+
+
+class ImageGeneratorService(BaseService):
+    """图片生成服务。
+
+    负责与 NovelAI 官方 API 交互，处理图片生成、Vibe 参考图传递等功能。
+    使用类级别任务队列串行化所有生图请求，防止 429 封号。
+    """
+
+    service_name: str = "image_generator"
+    service_description: str = "NovelAI 图片生成服务"
+    version: str = "2.0.0"
+
+    # ── 类级别的任务队列和锁，确保所有实例共享同一队列（防止 429 封号）──
+    _task_queue: asyncio.Queue[tuple[Any, asyncio.Future[Any]]] = asyncio.Queue()
+    _queue_worker_started: bool = False
+    _queue_lock: asyncio.Lock = asyncio.Lock()
+
+    def __init__(self, plugin: "BasePlugin") -> None:
+        """初始化服务。
+
+        Args:
+            plugin: 所属插件实例
+        """
+        super().__init__(plugin)
+
+        # 插件目录（通过 __file__ 推算）
+        self.plugin_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        # 运行时状态
+        self.current_key_index: int = 0
+        self.last_request_time: float = 0
+        self.user_vibes: dict[str, list[dict[str, Any]]] = {}
+
+        # 配置将在 initialize() 中加载
+        self.api_keys: list[str] = []
+        self.base_url: str = ""
+        self.proxy: str = ""
+        self.cooldown: int = 20
+        self.model: str = ""
+        self.noise_schedule: str = ""
+        self.resolution: str = ""
+        self.steps: int = 28
+        self.scale: float = 5.0
+        self.sampler: str = ""
+        self.prompt_guidance_rescale: float = 0.0
+        self.negative_prompt: str = ""
+        self.character_prompt: str = ""
+        self.max_vibes: int = 4
+        self.img2img_default_strength: float = 0.7
+        self.temp_dir: Path = Path()
+        self.vibe_storage_dir: Path = Path()
+        self.command_images_dir: Path = Path()
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  初始化 / 清理
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def initialize(self) -> None:
+        """初始化服务：加载配置、创建目录、启动队列处理器。"""
+        cfg: ImageGeneratorConfig = self.plugin.config  # type: ignore[assignment]
+
+        # API 配置
+        self.api_keys = list(cfg.api.api_keys)
+        self.base_url = cfg.api.base_url
+        self.proxy = cfg.api.proxy
+        self.cooldown = cfg.api.cooldown
+
+        # 生图参数
+        self.model = cfg.generation.model
+        self.noise_schedule = cfg.generation.noise_schedule
+        self.resolution = cfg.generation.resolution
+        self.steps = cfg.generation.steps
+        self.scale = cfg.generation.scale
+        self.sampler = cfg.generation.sampler
+        self.prompt_guidance_rescale = cfg.generation.prompt_guidance_rescale
+        self.negative_prompt = cfg.generation.negative_prompt
+        self.character_prompt = cfg.generation.character_prompt
+
+        # 高级参数
+        self.max_vibes = cfg.advanced.max_vibes
+        self.img2img_default_strength = cfg.advanced.img2img_default_strength
+
+        # 目录
+        self.temp_dir = self.plugin_dir / cfg.advanced.temp_dir
+        self.vibe_storage_dir = self.plugin_dir / cfg.advanced.vibe_storage_dir
+        self.command_images_dir = self.plugin_dir / cfg.advanced.command_images_dir
+
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.vibe_storage_dir.mkdir(parents=True, exist_ok=True)
+        self.command_images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 检查配置
+        if not self.api_keys:
+            logger.warning("未配置 API Key，图片生成功能将不可用")
+
+        # 启动全局任务队列处理器（防 429 封号）
+        await self._start_queue_worker()
+
+        logger.info("图片生成服务初始化完成")
+
+    async def cleanup(self) -> None:
+        """清理服务资源。保留缓存文件。"""
+        pass
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  任务队列（防 429 封号核心机制）
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _start_queue_worker(self) -> None:
+        """启动全局任务队列处理器。"""
+        async with ImageGeneratorService._queue_lock:
+            if not ImageGeneratorService._queue_worker_started:
+                ImageGeneratorService._queue_worker_started = True
+                get_task_manager().create_task(
+                    self._queue_worker(), name="image_generator_queue_worker"
+                )
+                logger.info("全局生图任务队列处理器已启动（防 429 封号）")
+
+    async def _queue_worker(self) -> None:
+        """队列处理器：串行处理所有生图任务。"""
+        while True:
+            task_func = None
+            result_future: asyncio.Future[Any] | None = None
+            try:
+                task_func, result_future = await ImageGeneratorService._task_queue.get()
+                result = await task_func()
+                if not result_future.done():
+                    result_future.set_result(result)
+                else:
+                    logger.warning("任务结果 future 已完成，跳过设置结果")
+            except Exception as e:
+                logger.error(f"队列处理器捕获异常: {e}", exc_info=True)
+                if result_future is not None and not result_future.done():
+                    try:
+                        result_future.set_exception(e)
+                    except Exception as set_ex:
+                        logger.error(f"设置异常失败: {set_ex}", exc_info=True)
+            finally:
+                if task_func is not None:
+                    try:
+                        ImageGeneratorService._task_queue.task_done()
+                    except Exception as done_ex:
+                        logger.error(f"标记任务完成失败: {done_ex}", exc_info=True)
+                await asyncio.sleep(0.01)
+
+    async def _enqueue_task(self, task_func: Any) -> Any:
+        """将任务加入队列并等待结果。
+
+        Args:
+            task_func: 异步任务函数
+
+        Returns:
+            任务执行结果
+        """
+        result_future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        await ImageGeneratorService._task_queue.put((task_func, result_future))
+        logger.info(f"任务已加入队列，当前队列长度: {ImageGeneratorService._task_queue.qsize()}")
+        return await result_future
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  API Key 管理
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _get_current_api_key(self) -> Optional[str]:
+        """获取当前 API Key。"""
+        if not self.api_keys:
+            return None
+        return self.api_keys[self.current_key_index]
+
+    def _rotate_api_key(self) -> None:
+        """轮换 API Key。"""
+        if len(self.api_keys) > 1:
+            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+            logger.info(f"切换到 API Key {self.current_key_index + 1}/{len(self.api_keys)}")
+
+    def check_cooldown(self) -> tuple[bool, int]:
+        """检查冷却时间。
+
+        Returns:
+            (是否就绪, 剩余等待秒数)
+        """
+        now = time.time()
+        elapsed = now - self.last_request_time
+        if elapsed < self.cooldown:
+            return False, int(self.cooldown - elapsed)
+        return True, 0
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  提示词处理
+    # ═════════════════════════════════════════════════════════════════════
+
+    def _merge_negative_prompts(self, user_negative: Optional[str] = None) -> str:
+        """合并负面提示词：系统通用 + AI 特殊场景。
+
+        Args:
+            user_negative: AI 提供的特殊场景负面提示词
+
+        Returns:
+            合并后的完整负面提示词
+        """
+        base_negative = self.negative_prompt
+        if user_negative:
+            base_tags = set(tag.strip() for tag in base_negative.split(",") if tag.strip())
+            user_tags = set(tag.strip() for tag in user_negative.split(",") if tag.strip())
+            all_tags = base_tags | user_tags
+            return ", ".join(sorted(all_tags))
+        return base_negative
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  Payload 构造（双 API 格式支持）
+    # ═════════════════════════════════════════════════════════════════════
+
+    def construct_payload(
+        self,
+        prompt: str,
+        user_id: str,
+        is_img2img: bool = False,
+        img_base64: Optional[str] = None,
+        strength: Optional[float] = None,
+        negative_prompt: Optional[str] = None,
+        width: int = 1024,
+        height: int = 1024,
+    ) -> dict[str, Any]:
+        """构造 NovelAI 官方 API 请求 payload。
+
+        Args:
+            prompt: 正面提示词
+            user_id: 用户 ID
+            is_img2img: 是否为图生图
+            img_base64: 图生图的原图 base64
+            strength: 图生图强度
+            negative_prompt: 额外负面提示词
+            width: 图片宽度
+            height: 图片高度
+
+        Returns:
+            API 请求 payload 字典
+        """
+        return self._construct_novelai_payload(
+            prompt, user_id, is_img2img, img_base64, strength, negative_prompt, width, height,
+        )
+
+    def _construct_novelai_payload(
+        self,
+        prompt: str,
+        user_id: str,
+        is_img2img: bool,
+        img_base64: Optional[str],
+        strength: Optional[float],
+        negative_prompt: Optional[str],
+        width: int,
+        height: int,
+    ) -> dict[str, Any]:
+        """构造 NovelAI 官方 API payload。"""
+        is_v4_model = "diffusion-4" in self.model
+        is_v3_model = "diffusion-3" in self.model
+
+        parameters: dict[str, Any] = {
+            "width": width,
+            "height": height,
+            "scale": self.scale,
+            "steps": self.steps,
+            "sampler": self.sampler,
+            "seed": random.randint(0, 9999999999),
+            "n_samples": 1,
+            "ucPreset": 0,
+            "qualityToggle": True,
+            "sm": False,
+            "sm_dyn": False,
+            "noise_schedule": self.noise_schedule if is_v4_model else "native",
+        }
+
+        if is_v4_model:
+            merged_negative = self._merge_negative_prompts(negative_prompt)
+            parameters.update({
+                "params_version": 3,
+                "cfg_rescale": 0,
+                "autoSmea": False,
+                "legacy": False,
+                "legacy_v3_extend": False,
+                "legacy_uc": False,
+                "add_original_image": True,
+                "controlnet_strength": 1,
+                "dynamic_thresholding": False,
+                "prefer_brownian": True,
+                "normalize_reference_strength_multiple": True,
+                "use_coords": True,
+                "inpaintImg2ImgStrength": 1,
+                "deliberate_euler_ancestral_bug": False,
+                "skip_cfg_above_sigma": None,
+                "characterPrompts": [],
+                "v4_prompt": {
+                    "caption": {
+                        "base_caption": prompt,
+                        "char_captions": [],
+                    },
+                    "use_coords": True,
+                    "use_order": True,
+                },
+                "v4_negative_prompt": {
+                    "caption": {
+                        "base_caption": merged_negative,
+                        "char_captions": [],
+                    },
+                    "legacy_uc": False,
+                },
+                "negative_prompt": merged_negative,
+                "reference_image_multiple": [],
+                "reference_information_extracted_multiple": [],
+                "reference_strength_multiple": [],
+            })
+
+            # Vibe 参考图注入（用户手动添加的）
+            if not is_img2img:
+                user_vibes = self.user_vibes.get(user_id, [])
+                if user_vibes:
+                    logger.info(f"User {user_id} Vibe 注入：共 {len(user_vibes)} 个")
+                    parameters["reference_image_multiple"] = [v["data"] for v in user_vibes]
+                    parameters["reference_information_extracted_multiple"] = [v["ie"] for v in user_vibes]
+                    parameters["reference_strength_multiple"] = [v["strength"] for v in user_vibes]
+                    parameters["sm"] = True
+                    parameters["sm_dyn"] = True
+
+        elif is_v3_model:
+            parameters["negative_prompt"] = self._merge_negative_prompts(negative_prompt)
+
+        payload: dict[str, Any] = {
+            "input": prompt,
+            "model": self.model,
+            "action": "generate",
+            "parameters": parameters,
+        }
+
+        # 图生图
+        if is_img2img and img_base64:
+            if strength is None:
+                strength = self.img2img_default_strength
+            payload["action"] = "img2img"
+            payload["parameters"].update({
+                "image": img_base64,
+                "strength": strength,
+                "noise": 0.0,
+            })
+
+        return payload
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  图片生成
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def generate_image(
+        self,
+        prompt: str,
+        user_id: str,
+        group_id: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        width: int = 1024,
+        height: int = 1024,
+        is_img2img: bool = False,
+        img_base64: Optional[str] = None,
+        strength: Optional[float] = None,
+        from_command: bool = False,
+    ) -> tuple[bool, str, Optional[str]]:
+        """生成图片（通过队列串行执行，防止 429 封号）。
+
+        Args:
+            prompt: 正面提示词
+            user_id: 用户 ID
+            group_id: 群组 ID（可选）
+            negative_prompt: 额外负面提示词
+            width: 图片宽度
+            height: 图片高度
+            is_img2img: 是否为图生图
+            img_base64: 图生图的原图 base64
+            strength: 图生图强度
+            from_command: 是否来自命令调用
+
+        Returns:
+            (是否成功, 消息, 图片路径或 None)
+        """
+        async def task() -> tuple[bool, str, Optional[str]]:
+            return await self._generate_image_internal(
+                prompt, user_id, group_id, negative_prompt,
+                width, height, is_img2img, img_base64, strength,
+                from_command=from_command,
+            )
+
+        return await self._enqueue_task(task)
+
+    async def _generate_image_internal(
+        self,
+        prompt: str,
+        user_id: str,
+        group_id: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        width: int = 1024,
+        height: int = 1024,
+        is_img2img: bool = False,
+        img_base64: Optional[str] = None,
+        strength: Optional[float] = None,
+        from_command: bool = False,
+    ) -> tuple[bool, str, Optional[str]]:
+        """内部生成图片方法（实际执行逻辑）。"""
+        # 检查冷却
+        is_ready, wait_time = self.check_cooldown()
+        if not is_ready:
+            logger.info(f"需要等待冷却 {wait_time} 秒，队列中等待...")
+            await asyncio.sleep(wait_time)
+
+        # 检查 API Key
+        api_key = self._get_current_api_key()
+        if not api_key:
+            return False, "API Key 没配置，联系管理员看看", None
+
+        # 更新最后请求时间
+        self.last_request_time = time.time()
+
+        # 构造 payload
+        payload = self.construct_payload(
+            prompt, user_id, is_img2img, img_base64, strength,
+            negative_prompt=negative_prompt, width=width, height=height,
+        )
+
+        # 调试日志（隐藏 base64 数据）
+        import copy as _copy
+        debug_payload = _copy.deepcopy(payload)
+        params = debug_payload.get("parameters", {})
+        if "image" in params:
+            params["image"] = f"<Base64 data, {len(params['image'])} chars>"
+        if "reference_image_multiple" in params:
+            params["reference_image_multiple"] = [
+                f"<Data_{i}, {len(d)} chars>"
+                for i, d in enumerate(params["reference_image_multiple"])
+            ]
+        logger.info(f"请求 payload: {json.dumps(debug_payload, ensure_ascii=False, indent=2)}")
+
+        # 提交请求并获取结果
+        try:
+            result = await self._submit_and_poll(
+                payload, api_key, from_command=from_command,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"图片生成失败: {e}")
+            return False, f"生成失败了：{e!s}", None
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  API 提交与轮询
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _submit_and_poll(
+        self,
+        payload: dict[str, Any],
+        api_key: str,
+        retry_on_404: bool = False,
+        from_command: bool = False,
+    ) -> tuple[Any, str, Any]:
+        """提交请求至 NovelAI 官方 API 并获取结果。
+
+        Args:
+            payload: 请求参数
+            api_key: API 密钥
+            retry_on_404: 遇到连续 404 时是否自动重试
+            from_command: 是否来自命令调用
+        """
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/zip",
+            "Origin": "https://novelai.net",
+            "Referer": "https://novelai.net",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                " AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            ),
+        }
+
+        connector = None
+        if self.proxy:
+            connector = aiohttp.TCPConnector()
+            logger.info(f"使用代理: {self.proxy}")
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                request_kwargs: dict[str, Any] = {
+                    "json": payload,
+                    "headers": headers,
+                    "timeout": aiohttp.ClientTimeout(total=60),
+                }
+                if self.proxy:
+                    request_kwargs["proxy"] = self.proxy
+
+                # 429 重试处理
+                max_429_retries = 3
+                retry_delay = 20
+
+                for attempt in range(max_429_retries + 1):
+                    async with session.post(self.base_url, **request_kwargs) as resp:
+                        if resp.status == 429:
+                            if attempt < max_429_retries:
+                                logger.warning(
+                                    f"遇到 429 错误，{retry_delay} 秒后重试 "
+                                    f"(尝试 {attempt + 1}/{max_429_retries})"
+                                )
+                                await asyncio.sleep(retry_delay)
+                                continue
+                            else:
+                                self._rotate_api_key()
+                                return (
+                                    False,
+                                    f"请求太频繁了，已经重试了 {attempt} 次，等会儿再试吧",
+                                    None,
+                                )
+
+                        if resp.status not in (200, 201):
+                            err = await resp.text()
+                            try:
+                                import orjson
+                                msg = orjson.loads(err).get("message", err)
+                            except Exception:
+                                msg = err
+                            return False, f"请求失败了 ({resp.status}): {msg}", None
+
+                        # 检查实际文件头
+                        img_data = await resp.read()
+                        if img_data[:4] == b"PK\x03\x04":  # ZIP
+                            logger.info("检测到 ZIP 格式，开始解压...")
+                            return await self._extract_image_from_zip(
+                                img_data, from_command=from_command,
+                            )
+                        elif img_data[:4] == b"\x89PNG":  # PNG
+                            logger.info("检测到 PNG 格式，直接保存...")
+                            return await self._save_image_from_bytes(
+                                img_data, from_command=from_command,
+                            )
+                        else:
+                            logger.warning(f"未知文件格式，前 4 字节: {img_data[:4].hex()}")
+                            return await self._save_image_from_bytes(
+                                img_data, from_command=from_command,
+                            )
+
+            except asyncio.TimeoutError:
+                return False, "请求超时了，网络不太好", None
+            except Exception as e:
+                logger.error(f"请求异常: {e}", exc_info=True)
+                return False, f"网络出问题了：{e}", None
+
+        return False, "未知错误", None
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  图片保存辅助方法
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _extract_image_from_zip(
+        self, zip_data: bytes, *, from_command: bool = False
+    ) -> tuple[bool, str, Optional[str]]:
+        """从 ZIP 文件中提取图片。"""
+        import io
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+                for filename in zf.namelist():
+                    if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        img_data = zf.read(filename)
+                        return await self._save_image_from_bytes(
+                            img_data, from_command=from_command,
+                        )
+            return False, "ZIP 文件中没有找到图片", None
+        except Exception as e:
+            logger.error(f"解压 ZIP 失败: {e}")
+            return False, f"解压失败: {e}", None
+
+    async def _save_image_from_bytes(
+        self, img_data: bytes, *, from_command: bool = False
+    ) -> tuple[bool, str, Optional[str]]:
+        """从字节数据保存图片。
+
+        Args:
+            img_data: 图片字节数据
+            from_command: 是否来自命令调用（True = command_images, False = temp_images）
+        """
+        try:
+            if not img_data or len(img_data) == 0:
+                logger.error("图片数据为空")
+                return False, "图片数据为空", None
+
+            if img_data[:4] == b"\x89PNG":
+                logger.info(f"确认 PNG 格式，大小: {len(img_data)} bytes")
+            elif img_data[:4] == b"PK\x03\x04":
+                logger.error("这是 ZIP 文件，应该先解压")
+                return False, "错误：收到 ZIP 文件但未解压", None
+            else:
+                logger.warning(f"未知文件格式，前 8 字节: {img_data[:8].hex()}")
+
+            save_dir = self.command_images_dir if from_command else self.temp_dir
+            filename = f"{uuid.uuid4()}.png"
+            filepath = save_dir / filename
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            with open(filepath, "wb") as f:
+                f.write(img_data)
+                f.flush()
+                os.fsync(f.fileno())
+
+            actual_size = filepath.stat().st_size
+            if actual_size != len(img_data):
+                logger.warning(f"文件大小不匹配: 期望 {len(img_data)}, 实际 {actual_size}")
+
+            # PIL 验证
+            try:
+                with Image.open(filepath) as img:
+                    img.verify()
+                with Image.open(filepath) as img:
+                    logger.info(f"图片验证成功: {filepath}, 格式: {img.format}, 尺寸: {img.size}")
+            except Exception as verify_error:
+                logger.warning(f"PIL 验证失败（但文件已保存）: {verify_error}")
+
+            logger.info(f"图片已保存: {filepath}")
+            return True, "图片生成成功", str(filepath)
+        except Exception as e:
+            logger.error(f"保存图片失败: {e}", exc_info=True)
+            return False, f"保存图片失败: {e}", None
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  Vibe 管理
+    # ═════════════════════════════════════════════════════════════════════
+
+    def add_vibe(self, user_id: str, vibe_data: dict[str, Any]) -> tuple[bool, str]:
+        """添加 Vibe 到用户缓存。"""
+        if user_id not in self.user_vibes:
+            self.user_vibes[user_id] = []
+
+        if len(self.user_vibes[user_id]) >= self.max_vibes:
+            return False, f"最多同时叠加 {self.max_vibes} 个 Vibe"
+
+        self.user_vibes[user_id].append(vibe_data)
+        count = len(self.user_vibes[user_id])
+        return True, f"已添加 Vibe ({count}/{self.max_vibes})"
+
+    def clear_vibes(self, user_id: str) -> str:
+        """清空用户的 Vibe 缓存。"""
+        self.user_vibes[user_id] = []
+        return "已清空所有 Vibe 设置"
+
+    def get_vibe_status(self, user_id: str) -> str:
+        """获取用户的 Vibe 状态。"""
+        vibes = self.user_vibes.get(user_id, [])
+        if not vibes:
+            return "当前未加载任何 Vibe"
+
+        msg = f"当前已加载 {len(vibes)} 个 Vibe:\n"
+        for i, v in enumerate(vibes):
+            msg += f"{i + 1}. IE:{v['ie']}, Str:{v['strength']}\n"
+        return msg
+
+    def list_vibe_files(self) -> tuple[bool, str]:
+        """列出 Vibe 素材库文件。"""
+        try:
+            allowed_extensions = (
+                ".png", ".jpg", ".jpeg", ".webp",
+                ".txt", ".json", ".naiv4vibe", ".naiv4vibebundle",
+            )
+            files = [
+                f.name for f in self.vibe_storage_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in allowed_extensions
+            ]
+
+            if not files:
+                return True, "素材库为空"
+
+            msg = "素材库文件列表:\n" + "\n".join([f"• {f}" for f in files])
+            msg += "\n\n使用 /nai_vibe add [文件名] 加载素材"
+            return True, msg
+
+        except Exception as e:
+            logger.error(f"列出素材库文件失败: {e}")
+            return False, f"读取素材库失败: {e}"
+
+    async def load_vibe_from_file(self, user_id: str, file_name: str) -> tuple[bool, str]:
+        """从文件加载 Vibe。
+
+        Args:
+            user_id: 用户 ID
+            file_name: 文件名（支持模糊匹配）
+
+        Returns:
+            (是否成功, 消息)
+        """
+        # 查找文件（支持模糊匹配）
+        final_filename: str | None = None
+        exact_path = self.vibe_storage_dir / file_name
+
+        if exact_path.exists():
+            final_filename = file_name
+        else:
+            try:
+                allowed_extensions = (
+                    ".png", ".jpg", ".jpeg", ".webp",
+                    ".txt", ".json", ".naiv4vibe", ".naiv4vibebundle",
+                )
+                all_files = [
+                    f.name for f in self.vibe_storage_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in allowed_extensions
+                ]
+                candidates = [f for f in all_files if file_name.lower() in f.lower()]
+
+                if len(candidates) == 0:
+                    return False, f"素材库中找不到包含 '{file_name}' 的文件"
+                elif len(candidates) == 1:
+                    final_filename = candidates[0]
+                else:
+                    msg = f"找到 {len(candidates)} 个类似文件，请提供更精确的名称:\n"
+                    msg += "\n".join([f"• {c}" for c in candidates[:5]])
+                    if len(candidates) > 5:
+                        msg += f"\n...等共 {len(candidates)} 个"
+                    return False, msg
+            except Exception as e:
+                return False, f"读取素材库失败: {e}"
+
+        file_path = self.vibe_storage_dir / final_filename
+
+        try:
+            raw_image_b64 = ""
+            target_ie = 1.0
+            target_strength = 0.6
+
+            file_ext = final_filename.lower()
+
+            if file_ext.endswith((".txt", ".json", ".naiv4vibe", ".naiv4vibebundle")):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+
+                if content.startswith("{"):
+                    data_json = json.loads(content)
+                    source_data: dict[str, Any] = {}
+
+                    if "vibes" in data_json and isinstance(data_json["vibes"], list):
+                        if len(data_json["vibes"]) > 0:
+                            source_data = data_json["vibes"][0]
+                    else:
+                        source_data = data_json
+
+                    if "image" in source_data:
+                        raw_image_b64 = source_data["image"]
+                    else:
+                        return False, "JSON 数据中未找到 image 字段"
+
+                    import_info = source_data.get("importInfo", {})
+                    if "information_extracted" in import_info:
+                        target_ie = float(import_info["information_extracted"])
+                    elif "information_extracted" in source_data:
+                        target_ie = float(source_data["information_extracted"])
+
+                    if "strength" in import_info:
+                        target_strength = float(import_info["strength"])
+                    elif "strength" in source_data:
+                        target_strength = float(source_data["strength"])
+                else:
+                    raw_image_b64 = content
+            else:
+                with open(file_path, "rb") as f:
+                    raw_image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            if not raw_image_b64:
+                return False, "数据无效"
+
+            # 官方 NovelAI API 直接使用原图 base64，服务端处理编码
+            vibe_obj = {
+                "data": raw_image_b64,
+                "ie": target_ie,
+                "strength": target_strength,
+            }
+
+            success, msg = self.add_vibe(user_id, vibe_obj)
+            if not success:
+                return False, msg
+
+            current_index = len(self.user_vibes[user_id])
+            result_msg = f"已添加【{final_filename}】\n"
+            result_msg += f"{current_index}. IE:{target_ie}, Str:{target_strength}"
+
+            return True, result_msg
+
+        except Exception as e:
+            logger.error(f"加载 Vibe 文件失败: {e}")
+            return False, f"加载失败: {e}"
+
+    async def get_user_info(self) -> tuple[bool, str]:
+        """NovelAI 官方 API 不提供账号信息查询。"""
+        return False, "NovelAI 官方 API 不支持账号信息查询"

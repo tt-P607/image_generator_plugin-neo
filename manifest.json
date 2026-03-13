@@ -1,0 +1,53 @@
+{
+    "name": "image_generator_plugin",
+    "version": "2.0.0",
+    "description": "基于 NovelAI 官方 API 的 AI 图片生成插件，支持文生图、图生图、Vibe 参考图等功能",
+    "author": "言柒",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "action",
+            "component_name": "draw_image",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "generate_selfie",
+            "dependencies": []
+        },
+        {
+            "component_type": "command",
+            "component_name": "nai_image",
+            "dependencies": []
+        },
+        {
+            "component_type": "command",
+            "component_name": "nai_edit",
+            "dependencies": []
+        },
+        {
+            "component_type": "command",
+            "component_name": "nai_vibe",
+            "dependencies": []
+        },
+        {
+            "component_type": "service",
+            "component_name": "image_generator",
+            "dependencies": []
+        },
+        {
+            "component_type": "config",
+            "component_name": "config",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0",
+    "python_dependencies": [
+        "aiohttp",
+        "pillow>=12.1.0"
+    ]
+}
