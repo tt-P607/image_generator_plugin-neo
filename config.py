@@ -11,22 +11,19 @@ from typing import ClassVar
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
 
-class VibePresetConfig(SectionBase):
-    """单个 Vibe 预设项配置。
-
-    用于 [[vibe.presets]] 列表中的每一条记录。
-    """
+class VibeItemConfig(SectionBase):
+    """单个 Vibe 配置项，always 和 selectable 列表通用。"""
 
     file: str = Field(
         description="vibes/ 目录下的文件名（支持 .naiv4vibe / .naiv4vibebundle / .png / .jpg）",
     )
     ie: float = Field(
         default=1.0,
-        description="information_extracted：提取的信息量（0.0–1.0），越高引用越多画面内容",
+        description="information_extracted：提取的信息量（0.0–1.0）",
     )
     strength: float = Field(
         default=0.6,
-        description="参考强度（0.0–1.0），越高生成结果越贴近参考图风格",
+        description="参考强度（0.0–1.0）",
     )
 
 
@@ -171,36 +168,27 @@ class ImageGeneratorConfig(BaseConfig):
 
     @config_section("vibe")
     class VibeSection(SectionBase):
-        """Vibe 参考图自动注入配置。
+        """Vibe 参考图注入配置。
 
-        支持两种模式（可同时开启）：
-        - manual_enabled：无论何时生图都始终注入下方 presets 列表中的 Vibe。
-        - auto_select：在 draw_image Action 的参数中新增 use_preset_vibes 选项，
-          让 LLM 自行判断当前场景是否需要使用 Vibe 预设（需配合 action_description
-          告知 AI 在什么情况下启用）。
-
-        注意：两种模式都依赖 presets 列表，列表为空则不生效。
+        - always：每次生图都注入，适合固定风格底图。
+        - selectable：供 LLM 按场景自选，文件名即画风名。
         """
 
-        manual_enabled: bool = Field(
+        always_enabled: bool = Field(
             default=False,
-            description="始终注入 Vibe 预设（每次生图都使用 presets 列表中的 Vibe）",
+            description="启用始终注入模式（every次生图都注入 always 列表中的 Vibe）",
         )
-        auto_select: bool = Field(
+        selectable_enabled: bool = Field(
             default=False,
-            description=(
-                "允许 LLM 自行决定是否使用 Vibe 预设。\n"
-                "开启后 draw_image Action 会增加 use_preset_vibes 布尔参数，"
-                "LLM 可根据场景选择是否附加 Vibe。"
-            ),
+            description="启用 LLM 自选模式（draw_image 新增 selected_vibes 参数，LLM 可按场景选择 selectable 中的画风）",
         )
-        presets: list[VibePresetConfig] = Field(
+        always: list[VibeItemConfig] = Field(
             default_factory=list,
-            description=(
-                "Vibe 预设列表，每项对应 vibes/ 目录中的一个文件。\n"
-                "manual_enabled 或 LLM 选择 use_preset_vibes=true 时，"
-                "列表中所有 Vibe 都会被注入到生图请求。"
-            ),
+            description="始终注入的 Vibe 列表（always_enabled=true 时每次生图都使用）",
+        )
+        selectable: list[VibeItemConfig] = Field(
+            default_factory=list,
+            description="LLM 可自选的 Vibe 列表（文件名即画风名，selectable_enabled=true 时生效）",
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

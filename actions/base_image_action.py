@@ -47,6 +47,7 @@ class BaseImageAction(BaseAction):
         height: int = 1024,
         success_message: str = "[内部：已发送图片]",
         error_prefix: str = "生成失败",
+        selected_vibe_names: Optional[list[str]] = None,
     ) -> tuple[bool, str]:
         """生成图片并发送（统一封装方法）。
 
@@ -57,6 +58,7 @@ class BaseImageAction(BaseAction):
             height: 图片高度
             success_message: 成功时返回的消息
             error_prefix: 错误消息前缀
+            selected_vibe_names: LLM 选择的可选 Vibe 名称列表
 
         Returns:
             (是否成功, 消息)
@@ -78,6 +80,7 @@ class BaseImageAction(BaseAction):
                 height=height,
                 user_id=str(user_id),
                 group_id=str(group_id) if group_id else None,
+                selected_vibe_names=selected_vibe_names,
             )
 
             if success and image_path:
@@ -124,28 +127,43 @@ class BaseImageAction(BaseAction):
             return False, f"发送图片失败: {e}"
 
     def _parse_resolution(self, resolution: str, default: str = "1024x1024") -> tuple[int, int]:
-        """解析画幅字符串为宽高，失败时自动回退到默认值。
+        """解析画幅字符串为宽高，失败时依次回退到 service 配置的 resolution，最后是 1024x1024。
 
         Args:
             resolution: 画幅字符串，如 '1216x832'
-            default: 默认画幅
+            default: 方法级默认画幅（action 特有的偏好，如 selfie 偏好 '832x1216'）
 
         Returns:
             (width, height)
         """
-        try:
-            width_str, height_str = resolution.lower().split("x")
-            width = int(width_str.strip())
-            height = int(height_str.strip())
+        valid_sizes = {(1216, 832), (832, 1216), (1024, 1024)}
 
-            valid_sizes = [(1216, 832), (832, 1216), (1024, 1024)]
-            if (width, height) not in valid_sizes:
-                logger.warning(f"不支持的画幅 {width}x{height}，使用默认 {default}")
-                return self._parse_resolution(default, default="1024x1024")
+        def _try_parse(s: str) -> tuple[int, int] | None:
+            try:
+                w_str, h_str = s.lower().split("x")
+                w, h = int(w_str.strip()), int(h_str.strip())
+                return (w, h) if (w, h) in valid_sizes else None
+            except Exception:
+                return None
 
-            return width, height
-        except Exception as e:
-            logger.error(f"解析画幅失败: {resolution}, 错误: {e}, 使用默认 {default}")
-            if default != "1024x1024":
-                return self._parse_resolution(default, default="1024x1024")
-            return 1024, 1024
+        # 1. 优先使用传入值
+        result = _try_parse(resolution)
+        if result:
+            return result
+
+        # 2. 回退到服务配置的 resolution
+        service = self.get_service()
+        if service and service.resolution:
+            result = _try_parse(service.resolution)
+            if result:
+                logger.warning(f"画幅 {resolution!r} 无效，使用配置默认值 {service.resolution}")
+                return result
+
+        # 3. 回退到 Action 方法级默认值
+        result = _try_parse(default)
+        if result:
+            logger.warning(f"画幅 {resolution!r} 无效，使用方法默认值 {default}")
+            return result
+
+        # 4. 终极兜底
+        return 1024, 1024

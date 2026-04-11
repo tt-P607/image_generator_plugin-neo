@@ -34,7 +34,16 @@ class DrawAction(BaseImageAction):
     action_name: str = "draw_image"
     action_description: str = (
         "为用户画一张图片。当用户想要任何图片时就使用此功能，"
-        "包括但不限于：'画个...' '生成一张...' '来张...' 等。"
+        "包括但不限于：'画个...' '生成一张...' '来张...' 等。\n\n"
+        "【提示词编写规范】\n"
+        "- **绝对禁止中文**：content_description 必须 100% 使用英文 NovelAI 标签。\n"
+        "- **核心格式**：逗号分隔的英文标签，NovelAI 标准格式（小写字母，下划线连接复合词）。\n"
+        "  标签顺序：质量/风格 > 主体/动作 > 细节/环境。\n"
+        "- **高级加权**：使用 `n::tag::` 语法。n>1 提升权重（如 `1.3::red hair::`），n<1 降低。\n"
+        "- **标签转换**：将中文概念拆解为具体英文标签。人物需含数量+特征+服装+表情+动作。\n"
+        "- **角色标注**：特定角色用 `character_name (source)` 格式。\n"
+        "- **画质标签**：建议包含 `masterpiece, best quality, highres`。\n"
+        "- **画幅选择**：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024。"
     )
 
     primary_action: bool = False
@@ -57,6 +66,11 @@ class DrawAction(BaseImageAction):
             "特殊场景的负面提示词，英文逗号分隔的标签，用于排除不想要的元素。"
             "如无特殊需求可留空。",
         ] = "",
+        selected_vibes: Annotated[
+            str,
+            "从可用画风列表中选择要应用的 Vibe 名称，多个用英文逗号分隔。"
+            "不需要风格或无可选列表时留空。",
+        ] = "",
     ) -> tuple[bool, str]:
         """执行画图动作。"""
         if not content_description:
@@ -71,6 +85,12 @@ class DrawAction(BaseImageAction):
         if negative_prompt:
             logger.info(f"用户负面提示词: {negative_prompt}")
 
+        # 解析逗号分隔的 Vibe 名称
+        vibe_names: list[str] | None = None
+        if selected_vibes.strip():
+            vibe_names = [v.strip() for v in selected_vibes.split(",") if v.strip()]
+            logger.info(f"LLM 选择的 Vibe: {vibe_names}")
+
         return await self.generate_and_send_image(
             prompt=prompt,
             negative_prompt=negative_prompt or None,
@@ -78,6 +98,7 @@ class DrawAction(BaseImageAction):
             height=height,
             success_message="[内部：已发送画作]",
             error_prefix="画画失败了",
+            selected_vibe_names=vibe_names,
         )
 
     def _build_prompt(self, content_tags: str) -> str:

@@ -47,6 +47,11 @@ class ImageGeneratorPlugin(BasePlugin):
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后的回调，初始化服务并注入自定义场景说明。"""
+        cfg = self.config
+        if not isinstance(cfg, ImageGeneratorConfig) or not cfg.plugin.enabled:
+            logger.info("ImageGeneratorPlugin 已在配置中禁用")
+            return
+
         try:
             logger.info("初始化 ImageGeneratorPlugin...")
 
@@ -58,15 +63,34 @@ class ImageGeneratorPlugin(BasePlugin):
             logger.error(f"ImageGeneratorPlugin 初始化失败: {e}", exc_info=True)
             raise
 
+        # 将 character_prompt 注入 generate_selfie 描述，使 LLM 明确知道角色特征
+        character_prompt = cfg.generation.character_prompt.strip()
+        if character_prompt:
+            GenerateSelfieAction.action_description = (
+                GenerateSelfieAction.action_description.rstrip()
+                + f"\n\n【你的角色特征标签（已内置，scene_description/pose_or_action 中无需重复）】\n{character_prompt}"
+            )
+            logger.debug("已将 character_prompt 注入 generate_selfie 描述")
+
         # 将自定义场景说明追加到两个 action 的描述，使 Chatter 侧感知使用时机
-        if isinstance(self.config, ImageGeneratorConfig):
-            custom = self.config.prompt.custom_instructions.strip()
-            if custom:
-                for action_cls in (DrawAction, GenerateSelfieAction):
-                    action_cls.action_description = (
-                        action_cls.action_description.rstrip() + "\n\n" + custom
-                    )
-                logger.debug("已将自定义场景说明追加到 draw_image / generate_selfie 描述")
+        custom = cfg.prompt.custom_instructions.strip()
+        if custom:
+            for action_cls in (DrawAction, GenerateSelfieAction):
+                action_cls.action_description = (
+                    action_cls.action_description.rstrip() + "\n\n" + custom
+                )
+            logger.debug("已将自定义场景说明追加到 draw_image / generate_selfie 描述")
+
+        # 将可选 Vibe 列表注入 draw_image 描述，使 LLM 知道可选哪些画风
+        if cfg.vibe.selectable_enabled and cfg.vibe.selectable:
+            from pathlib import Path as _Path
+            vibe_names = [_Path(item.file).stem for item in cfg.vibe.selectable]
+            vibe_block = (
+                "\n\n【可选 Vibe 画风列表（通过 selected_vibes 参数选择，可多选，逗号分隔）】\n"
+                + "\n".join(f"  - {name}" for name in vibe_names)
+            )
+            DrawAction.action_description = DrawAction.action_description.rstrip() + vibe_block
+            logger.debug(f"已将 {len(cfg.vibe.selectable)} 个可选 Vibe 注入 draw_image 描述")
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的回调，清理资源。"""
@@ -79,22 +103,24 @@ class ImageGeneratorPlugin(BasePlugin):
 
         根据配置决定是否启用 Action 和 Command 组件。
         """
-        components: list[type] = []
         cfg = self.config
+        if not isinstance(cfg, ImageGeneratorConfig) or not cfg.plugin.enabled:
+            return []
 
-        if isinstance(cfg, ImageGeneratorConfig):
-            # Action 组件
-            if cfg.components.action_enabled:
-                components.append(DrawAction)
-                components.append(GenerateSelfieAction)
+        components: list[type] = []
 
-            # Command 组件
-            if cfg.components.command_enabled:
-                components.append(ImageGeneratorCommand)
-                components.append(ImageEditCommand)
-                components.append(VibeManagementCommand)
+        # Action 组件
+        if cfg.components.action_enabled:
+            components.append(DrawAction)
+            components.append(GenerateSelfieAction)
 
-        # Service 组件始终注册
+        # Command 组件
+        if cfg.components.command_enabled:
+            components.append(ImageGeneratorCommand)
+            components.append(ImageEditCommand)
+            components.append(VibeManagementCommand)
+
+        # Service 组件
         components.append(ImageGeneratorService)
 
         return components
