@@ -61,6 +61,10 @@ class ImageGeneratorService(BaseService):
         self.current_key_index: int = 0
         self.last_request_time: float = 0
         self.user_vibes: dict[str, list[dict[str, Any]]] = {}
+        self.preset_vibes: list[dict[str, Any]] = []  # 启动时编码好的预设 Vibe
+        self.selectable_vibes: dict[str, dict[str, Any]] = {}  # 按名称索引的可选 Vibe 池
+        self.manual_vibe_enabled: bool = False
+        self.auto_vibe_select: bool = False
 
         # 配置将在 initialize() 中加载
         self.api_keys: list[str] = []
@@ -120,12 +124,24 @@ class ImageGeneratorService(BaseService):
         self.vibe_storage_dir.mkdir(parents=True, exist_ok=True)
         self.command_images_dir.mkdir(parents=True, exist_ok=True)
 
+        # Vibe 配置
+        self.always_inject = cfg.vibe.always_enabled
+        self.selectable_enabled = cfg.vibe.selectable_enabled
+
         # 检查配置
         if not self.api_keys:
             logger.warning("未配置 API Key，图片生成功能将不可用")
 
         # 启动全局任务队列处理器（防 429 封号）
         await self._start_queue_worker()
+
+        # 加载并编码 always Vibe
+        if cfg.vibe.always and self.api_keys:
+            await self._load_preset_vibes(cfg.vibe.always)
+
+        # 加载并编码 selectable Vibe 池
+        if cfg.vibe.selectable and self.api_keys:
+            await self._load_selectable_vibes(cfg.vibe.selectable)
 
         logger.info("图片生成服务初始化完成")
 
@@ -146,6 +162,61 @@ class ImageGeneratorService(BaseService):
                     self._queue_worker(), name="image_generator_queue_worker"
                 )
                 logger.info("全局生图任务队列处理器已启动（防 429 封号）")
+
+    async def _load_selectable_vibes(self, selectable: list[Any]) -> None:
+        """在初始化时加载并编码所有可选 Vibe，结果按名称缓存在 self.selectable_vibes。"""
+        self.selectable_vibes = {}
+        for item in selectable:
+            file_path = self.vibe_storage_dir / item.file
+            if not file_path.exists():
+                logger.warning(f"可选 Vibe 文件不存在，跳过: {item.file}")
+                continue
+            try:
+                raw_b64 = self._read_image_b64_from_vibe_file(file_path)
+                if not raw_b64:
+                    logger.warning(f"可选 Vibe 文件读取为空，跳过: {item.file}")
+                    continue
+                encoded = await self._encode_vibe(raw_b64, item.ie)
+                if not encoded:
+                    logger.warning(f"可选 Vibe 编码失败，跳过: {item.file}")
+                    continue
+                name = Path(item.file).stem
+                self.selectable_vibes[name] = {
+                    "data": encoded,
+                    "ie": item.ie,
+                    "strength": item.strength,
+                }
+                logger.info(f"已编码可选 Vibe: {name} ({item.file})")
+            except Exception as e:
+                logger.error(f"加载可选 Vibe 失败 [{item.file}]: {e}")
+        logger.info(f"可选 Vibe 池加载完成，共 {len(self.selectable_vibes)} 个")
+
+    async def _load_preset_vibes(self, presets: list[Any]) -> None:
+        """在初始化时加载并编码所有预设 Vibe，结果缓存在 self.preset_vibes."""
+        self.preset_vibes = []
+        for preset in presets:
+            file_path = self.vibe_storage_dir / preset.file
+            if not file_path.exists():
+                logger.warning(f"预设 Vibe 文件不存在，跳过: {preset.file}")
+                continue
+            try:
+                raw_b64 = self._read_image_b64_from_vibe_file(file_path)
+                if not raw_b64:
+                    logger.warning(f"预设 Vibe 文件读取为空，跳过: {preset.file}")
+                    continue
+                encoded = await self._encode_vibe(raw_b64, preset.ie)
+                if not encoded:
+                    logger.warning(f"预设 Vibe 编码失败，跳过: {preset.file}")
+                    continue
+                self.preset_vibes.append({
+                    "data": encoded,
+                    "ie": preset.ie,
+                    "strength": preset.strength,
+                })
+                logger.info(f"已编码预设 Vibe: {preset.file} (IE={preset.ie}, Str={preset.strength})")
+            except Exception as e:
+                logger.error(f"加载预设 Vibe 失败 [{preset.file}]: {e}")
+        logger.info(f"预设 Vibe 加载完成，共 {len(self.preset_vibes)} 个")
 
     async def _queue_worker(self) -> None:
         """队列处理器：串行处理所有生图任务。"""
@@ -204,6 +275,90 @@ class ImageGeneratorService(BaseService):
             self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
             logger.info(f"切换到 API Key {self.current_key_index + 1}/{len(self.api_keys)}")
 
+    async def _encode_vibe(self, raw_image_b64: str, information_extracted: float) -> Optional[str]:
+        """调用 /ai/encode-vibe 端点将原始图片编码为 Vibe 向量。
+
+        Args:
+            raw_image_b64: 原始图片的 base64 字符串（PNG/JPG）
+            information_extracted: 信息提取量（0.0–1.0）
+
+        Returns:
+            编码后的 Vibe 数据 base64 字符串，失败返回 None
+        """
+        api_key = self._get_current_api_key()
+        if not api_key:
+            logger.error("无 API Key，无法编码 Vibe")
+            return None
+
+        encode_url = self.base_url.replace("/ai/generate-image", "/ai/encode-vibe")
+
+        payload = {
+            "image": raw_image_b64,
+            "information_extracted": information_extracted,
+            "model": self.model,
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Origin": "https://novelai.net",
+            "Referer": "https://novelai.net",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                " AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+            ),
+        }
+        connector = None
+        if self.proxy:
+            connector = aiohttp.TCPConnector()
+
+        try:
+            async with aiohttp.ClientSession(connector=connector) as session:
+                request_kwargs: dict[str, Any] = {
+                    "json": payload,
+                    "headers": headers,
+                    "timeout": aiohttp.ClientTimeout(total=60),
+                }
+                if self.proxy:
+                    request_kwargs["proxy"] = self.proxy
+
+                async with session.post(encode_url, **request_kwargs) as resp:
+                    if resp.status not in (200, 201):
+                        err = await resp.text()
+                        logger.error(f"encode-vibe 请求失败 ({resp.status}): {err}")
+                        return None
+                    content = await resp.read()
+                    return base64.b64encode(content).decode("utf-8")
+        except Exception as e:
+            logger.error(f"encode-vibe 异常: {e}")
+            return None
+
+    def _read_image_b64_from_vibe_file(self, file_path: Path) -> str:
+        """从 Vibe 文件中读取原始图片 base64。
+
+        Args:
+            file_path: 文件路径（支持 .naiv4vibe/.naiv4vibebundle/.png/.jpg 等）
+
+        Returns:
+            图片 base64 字符串
+        """
+        suffix = file_path.suffix.lower()
+        if suffix in (".naiv4vibe", ".naiv4vibebundle", ".json", ".txt"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content.startswith("{"):
+                data_json = json.loads(content)
+                source_data: dict[str, Any] = {}
+                if "vibes" in data_json and isinstance(data_json["vibes"], list):
+                    if data_json["vibes"]:
+                        source_data = data_json["vibes"][0]
+                else:
+                    source_data = data_json
+                return source_data.get("image", "")
+            return content  # 纯 base64 文本
+        else:
+            with open(file_path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+
     def check_cooldown(self) -> tuple[bool, int]:
         """检查冷却时间。
 
@@ -251,6 +406,7 @@ class ImageGeneratorService(BaseService):
         negative_prompt: Optional[str] = None,
         width: int = 1024,
         height: int = 1024,
+        selected_vibe_names: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """构造 NovelAI 官方 API 请求 payload。
 
@@ -269,6 +425,7 @@ class ImageGeneratorService(BaseService):
         """
         return self._construct_novelai_payload(
             prompt, user_id, is_img2img, img_base64, strength, negative_prompt, width, height,
+            selected_vibe_names=selected_vibe_names,
         )
 
     def _construct_novelai_payload(
@@ -281,6 +438,7 @@ class ImageGeneratorService(BaseService):
         negative_prompt: Optional[str],
         width: int,
         height: int,
+        selected_vibe_names: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """构造 NovelAI 官方 API payload。"""
         is_v4_model = "diffusion-4" in self.model
@@ -292,7 +450,7 @@ class ImageGeneratorService(BaseService):
             "scale": self.scale,
             "steps": self.steps,
             "sampler": self.sampler,
-            "seed": random.randint(0, 9999999999),
+            "seed": random.randint(0, 999999999),
             "n_samples": 1,
             "ucPreset": 0,
             "qualityToggle": True,
@@ -305,7 +463,7 @@ class ImageGeneratorService(BaseService):
             merged_negative = self._merge_negative_prompts(negative_prompt)
             parameters.update({
                 "params_version": 3,
-                "cfg_rescale": 0,
+                "cfg_rescale": self.prompt_guidance_rescale,
                 "autoSmea": False,
                 "legacy": False,
                 "legacy_v3_extend": False,
@@ -341,16 +499,36 @@ class ImageGeneratorService(BaseService):
                 "reference_strength_multiple": [],
             })
 
-            # Vibe 参考图注入（用户手动添加的）
+            # Vibe 参考图注入（预设 + 用户手动添加）
             if not is_img2img:
+                vibes_to_inject: list[dict[str, Any]] = []
+
+                # 始终注入的 Vibe（always_inject 时）
+                if self.always_inject and self.preset_vibes:
+                    vibes_to_inject.extend(self.preset_vibes)
+                    logger.info(f"注入预设 Vibe：共 {len(self.preset_vibes)} 个")
+
+                # LLM 选择的可选 Vibe
+                if selected_vibe_names and self.selectable_vibes:
+                    for name in selected_vibe_names:
+                        vibe = self.selectable_vibes.get(name)
+                        if vibe:
+                            vibes_to_inject.append(vibe)
+                        else:
+                            logger.warning(f"LLM 选择了不存在的 Vibe: {name!r}，跳过")
+                    if selected_vibe_names:
+                        logger.info(f"LLM 选择的 Vibe: {selected_vibe_names}")
+
+                # 用户手动添加的 Vibe
                 user_vibes = self.user_vibes.get(user_id, [])
                 if user_vibes:
-                    logger.info(f"User {user_id} Vibe 注入：共 {len(user_vibes)} 个")
-                    parameters["reference_image_multiple"] = [v["data"] for v in user_vibes]
-                    parameters["reference_information_extracted_multiple"] = [v["ie"] for v in user_vibes]
-                    parameters["reference_strength_multiple"] = [v["strength"] for v in user_vibes]
-                    parameters["sm"] = True
-                    parameters["sm_dyn"] = True
+                    vibes_to_inject.extend(user_vibes)
+                    logger.info(f"User {user_id} 手动 Vibe 注入：共 {len(user_vibes)} 个")
+
+                if vibes_to_inject:
+                    parameters["reference_image_multiple"] = [v["data"] for v in vibes_to_inject]
+                    parameters["reference_information_extracted_multiple"] = [v["ie"] for v in vibes_to_inject]
+                    parameters["reference_strength_multiple"] = [v["strength"] for v in vibes_to_inject]
 
         elif is_v3_model:
             parameters["negative_prompt"] = self._merge_negative_prompts(negative_prompt)
@@ -391,6 +569,7 @@ class ImageGeneratorService(BaseService):
         img_base64: Optional[str] = None,
         strength: Optional[float] = None,
         from_command: bool = False,
+        selected_vibe_names: Optional[list[str]] = None,
     ) -> tuple[bool, str, Optional[str]]:
         """生成图片（通过队列串行执行，防止 429 封号）。
 
@@ -414,6 +593,7 @@ class ImageGeneratorService(BaseService):
                 prompt, user_id, group_id, negative_prompt,
                 width, height, is_img2img, img_base64, strength,
                 from_command=from_command,
+                selected_vibe_names=selected_vibe_names,
             )
 
         return await self._enqueue_task(task)
@@ -430,6 +610,7 @@ class ImageGeneratorService(BaseService):
         img_base64: Optional[str] = None,
         strength: Optional[float] = None,
         from_command: bool = False,
+        selected_vibe_names: Optional[list[str]] = None,
     ) -> tuple[bool, str, Optional[str]]:
         """内部生成图片方法（实际执行逻辑）。"""
         # 检查冷却
@@ -450,6 +631,7 @@ class ImageGeneratorService(BaseService):
         payload = self.construct_payload(
             prompt, user_id, is_img2img, img_base64, strength,
             negative_prompt=negative_prompt, width=width, height=height,
+            selected_vibe_names=selected_vibe_names,
         )
 
         # 调试日志（隐藏 base64 数据）
@@ -752,53 +934,21 @@ class ImageGeneratorService(BaseService):
         file_path = self.vibe_storage_dir / final_filename
 
         try:
-            raw_image_b64 = ""
             target_ie = 1.0
             target_strength = 0.6
 
-            file_ext = final_filename.lower()
-
-            if file_ext.endswith((".txt", ".json", ".naiv4vibe", ".naiv4vibebundle")):
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-
-                if content.startswith("{"):
-                    data_json = json.loads(content)
-                    source_data: dict[str, Any] = {}
-
-                    if "vibes" in data_json and isinstance(data_json["vibes"], list):
-                        if len(data_json["vibes"]) > 0:
-                            source_data = data_json["vibes"][0]
-                    else:
-                        source_data = data_json
-
-                    if "image" in source_data:
-                        raw_image_b64 = source_data["image"]
-                    else:
-                        return False, "JSON 数据中未找到 image 字段"
-
-                    import_info = source_data.get("importInfo", {})
-                    if "information_extracted" in import_info:
-                        target_ie = float(import_info["information_extracted"])
-                    elif "information_extracted" in source_data:
-                        target_ie = float(source_data["information_extracted"])
-
-                    if "strength" in import_info:
-                        target_strength = float(import_info["strength"])
-                    elif "strength" in source_data:
-                        target_strength = float(source_data["strength"])
-                else:
-                    raw_image_b64 = content
-            else:
-                with open(file_path, "rb") as f:
-                    raw_image_b64 = base64.b64encode(f.read()).decode("utf-8")
+            raw_image_b64 = self._read_image_b64_from_vibe_file(file_path)
 
             if not raw_image_b64:
-                return False, "数据无效"
+                return False, "文件数据无效或未找到 image 字段"
 
-            # 官方 NovelAI API 直接使用原图 base64，服务端处理编码
+            # 调用 /ai/encode-vibe 端点编码，API 要求传入编码后的向量，而非原始图片
+            encoded = await self._encode_vibe(raw_image_b64, target_ie)
+            if not encoded:
+                return False, "Vibe 编码失败，请检查 API Key 和网络连接"
+
             vibe_obj = {
-                "data": raw_image_b64,
+                "data": encoded,
                 "ie": target_ie,
                 "strength": target_strength,
             }

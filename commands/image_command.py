@@ -10,7 +10,8 @@ from typing import Optional
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.send_api import send_image, send_text
-from src.core.components.base.command import BaseCommand, cmd_route
+from src.app.plugin_system.base import BaseCommand, cmd_route
+from src.core.components.types import PermissionLevel
 
 from ..services.image_service import ImageGeneratorService
 from ..utils.image_utils import ImageUtils
@@ -199,16 +200,28 @@ class ImageGeneratorCommand(BaseCommand):
 
     command_name: str = "nai_image"
     command_description: str = "NovelAI 文生图 - 根据提示词生成图片"
-    command_prefix: str = "/"
+    permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
         return getattr(self.plugin, "image_service", None)
 
-    @cmd_route("draw")
-    async def handle_draw(self, *args: str) -> tuple[bool, str]:
-        """文生图：/nai_image draw [画幅] <提示词> [---负面词]"""
-        all_args = list(args)
+    async def execute(self, message_text: str) -> tuple[bool, str]:  # type: ignore[override]
+        """入口路由：/nai_image draw <提示词> 或直接 /nai_image <提示词>。"""
+        text = message_text.strip()
+        if not text:
+            await send_text(pick(MISSING_PROMPT_HINTS, "missing_prompt"), stream_id=self.stream_id)
+            return False, "缺少提示词"
+        parts = text.split(maxsplit=1)
+        if parts[0].lower() == "draw":
+            rest = parts[1] if len(parts) > 1 else ""
+        else:
+            rest = text  # 没有子命令，整段视为提示词
+        return await self._do_draw(rest)
+
+    async def _do_draw(self, raw_text: str) -> tuple[bool, str]:
+        """文生图核心处理：[画幅] <提示词> [---负面词]"""
+        all_args = raw_text.split() if raw_text.strip() else []
         if not all_args:
             await send_text(
                 pick(MISSING_PROMPT_HINTS, "missing_prompt"),
@@ -303,7 +316,7 @@ class ImageGeneratorCommand(BaseCommand):
             if success and image_path:
                 ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
                 if ok and img_b64:
-                    await send_image(img_b64, stream_id=self.stream_id)
+                    await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
                     await send_text(
                         pick(DRAW_SUCCESS_HINTS, "draw_success"),
                         stream_id=self.stream_id,
@@ -338,22 +351,33 @@ class ImageGeneratorCommand(BaseCommand):
 class ImageEditCommand(BaseCommand):
     """图生图命令。
 
-    用法：/nai_edit <英文提示词> [强度:0.1-0.99]
+    用法：
+      /nai_edit edit <提示词> [强度:0.1-0.99]   - 标准用法
+      /nai_edit <提示词> [强度:0.1-0.99]        - 省略 edit 子命令
     需要引用一张图片。
     """
 
     command_name: str = "nai_edit"
     command_description: str = "NovelAI 图生图 - 基于引用图片进行编辑"
-    command_prefix: str = "/"
+    permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
         return getattr(self.plugin, "image_service", None)
 
-    @cmd_route("edit")
-    async def handle_edit(self, *args: str) -> tuple[bool, str]:
-        """图生图：/nai_edit edit <提示词> [强度]"""
-        all_args = list(args)
+    async def execute(self, message_text: str) -> tuple[bool, str]:  # type: ignore[override]
+        """入口路由：/nai_edit edit <提示词> 或直接 /nai_edit <提示词>。"""
+        text = message_text.strip()
+        parts = text.split(maxsplit=1)
+        if parts and parts[0].lower() == "edit":
+            rest = parts[1] if len(parts) > 1 else ""
+        else:
+            rest = text
+        return await self._do_edit(rest)
+
+    async def _do_edit(self, raw_text: str) -> tuple[bool, str]:
+        """图生图核心处理：<提示词> [强度]"""
+        all_args = raw_text.split() if raw_text.strip() else []
         if not all_args:
             await send_text("想改图的话，先引用一张图片然后告诉我怎么改", stream_id=self.stream_id)
             return False, "缺少参数"
@@ -392,7 +416,7 @@ class ImageEditCommand(BaseCommand):
             if success and image_path:
                 ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
                 if ok and img_b64:
-                    await send_image(img_b64, stream_id=self.stream_id)
+                    await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
                     await send_text(
                         pick(EDIT_SUCCESS_HINTS, "edit_success"),
                         stream_id=self.stream_id,
@@ -467,7 +491,7 @@ class VibeManagementCommand(BaseCommand):
 
     command_name: str = "nai_vibe"
     command_description: str = "Vibe 参考图管理"
-    command_prefix: str = "/"
+    permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
@@ -485,9 +509,9 @@ class VibeManagementCommand(BaseCommand):
         return success, message
 
     @cmd_route("add")
-    async def handle_add(self, *args: str) -> tuple[bool, str]:
-        """添加 Vibe 素材：/nai_vibe add <文件名>"""
-        if not args:
+    async def handle_add(self, filename: str) -> tuple[bool, str]:
+        """添加 Vibe 素材：/nai_vibe add <文件名>（含空格的文件名请用引号括起）"""
+        if not filename:
             await send_text("请提供文件名呀", stream_id=self.stream_id)
             return False, "缺少文件名参数"
 
@@ -495,7 +519,7 @@ class VibeManagementCommand(BaseCommand):
         if not service:
             return False, "服务未初始化"
 
-        file_name = " ".join(args)
+        file_name = filename
         user_id = "command_user"
 
         success, message = await service.load_vibe_from_file(user_id, file_name)

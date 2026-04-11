@@ -37,7 +37,13 @@ class GenerateSelfieAction(BaseImageAction):
     action_name: str = "generate_selfie"
     action_description: str = (
         "生成【你自己】的照片发给用户。当用户想看你的照片、自拍、样子、外观时使用。"
-        "配置文件中有你的角色特征锚定。"
+        "配置文件中有你的角色特征锚定，参数中无需重复基本外观。\n\n"
+        "【提示词编写规范】\n"
+        "- **触发条件**：仅当用户想看【你】的照片/自拍/样子/外观时调用，与 draw_image 的区别是画的是你自己。\n"
+        "- **绝对禁止中文**：所有参数必须 100% 使用英文 NovelAI 标签。\n"
+        "- **核心格式**：逗号分隔的英文标签，NovelAI 标准格式。\n"
+        "- **高级加权**：`n::tag::` 语法，重点用于强调动作、情绪和光影。\n"
+        "- **画幅选择**：人物竖图 832x1216，风景横图 1216x832，头像方图 1024x1024。"
     )
 
     primary_action: bool = False
