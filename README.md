@@ -67,3 +67,59 @@ Bot 会自动理解你的意图，调用 `draw_image` 或 `generate_selfie` 动�
 1. **API 额度**：生成图片会消耗 NovelAI 的 Anlas 点数或订阅额度。
 2. **网络环境**：请确保机器人所在的网络环境可以访问 `image.novelai.net`。
 3. **内容安全**：默认配置已包含负面提示词以规避 NSFW 内容，可根据需求在 `generation.negative_prompt` 中调整。
+
+## 👥 多人物（Multi-Character Workspace）
+
+`draw_image` Action 支持 NovelAI V4 系列模型的多人物精确定位，对应官方 Web UI 的 **multi-character workspace**。
+
+### 支持范围
+
+- **仅 V4 系列模型**（`nai-diffusion-4-*`），V3 调用会直接报错。
+- 单次生图最多 **6 个角色**（NovelAI Web UI 上限），可通过 `advanced.max_characters` 调整。
+
+### 调用方式
+
+LLM 调用 `draw_image` 时除常规 `content_description` 外，额外传入 `characters`（JSON 数组字符串）：
+
+```json
+[
+  {"prompt": "1girl, blonde, source#hugging", "uc": "lowres", "x": 0.3, "y": 0.5},
+  {"prompt": "1girl, black hair, target#hugging",                "x": 0.7, "y": 0.5}
+]
+```
+
+字段说明：
+
+| 字段 | 必填 | 含义 |
+| :--- | :--- | :--- |
+| `prompt` | ✅ | 该角色的英文标签 |
+| `uc` | 可省略（默认空） | 该角色专属负面词 |
+| `x` | 可省略（默认 0.5） | 水平位置 0.0~1.0，0=最左，1=最右 |
+| `y` | 可省略（默认 0.5） | 垂直位置 0.0~1.0，0=最上，1=最下 |
+
+### 角色互动语法（source# / target# / mutual#）
+
+将互动动作写在角色 `prompt` 里，**不要**写在全局 `content_description` 中。
+
+| 语法 | 含义 | 示例 |
+| :--- | :--- | :--- |
+| `source#动作` | 该角色是动作发起方 | `source#hugging` |
+| `target#动作` | 该角色是动作接受方 | `target#hugging` |
+| `mutual#动作` | 双方相互执行 | `mutual#holding hands` |
+
+注意事项：
+
+- `source#xxx` 与 `target#xxx` **必须成对**出现（分别在两个不同角色的 prompt 中）。
+- 同一对角色不要既写 `source#xxx` 又写 `mutual#xxx`，会冲突。
+- 互动动作只通过角色标签生效，全局 prompt 重复写会干扰构图。
+
+### 相关配置
+
+```toml
+[generation]
+always_use_coords = true   # true: x/y 严格生效；false: 交给模型自由排布
+
+[advanced]
+max_characters = 6         # 单次生图角色数上限
+```
+

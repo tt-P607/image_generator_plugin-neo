@@ -1,0 +1,14 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 生成的临时图片
+temp_images/
+command_images/
+
+# Vibe 素材文件（体积大，不入库）
+vibes/*.naiv4vibe
+vibes/*.naiv4vibebundle
+vibes/*.png
+vibes/*.jpg

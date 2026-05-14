@@ -11,7 +11,7 @@ from typing import Optional
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.send_api import send_image, send_text
 from src.app.plugin_system.base import BaseCommand, cmd_route
-from src.core.components.types import PermissionLevel
+from src.app.plugin_system.types import PermissionLevel
 
 from ..services.image_service import ImageGeneratorService
 from ..utils.image_utils import ImageUtils
@@ -147,6 +147,76 @@ GENERATE_ERROR_HINTS = [
 
 
 # ═════════════════════════════════════════════════════════════════════════
+#  命令行标志解析
+# ═════════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+_FLAG_PATTERN = _re.compile(
+    r"--scale\s+([\d.]+)|--rescale\s+([\d.]+)",
+    _re.IGNORECASE,
+)
+
+# 正负面关键字（兼容半角冒号 : 和全角冒号 ：）
+_POS_KW_RE = _re.compile(r"正面[：:]")
+_NEG_KW_RE = _re.compile(r"负面[：:]")
+
+
+def _extract_flags(text: str) -> tuple[Optional[float], Optional[float], str]:
+    """从命令文本中提取 --scale / --rescale 数值标志，返回 (scale, cfg_rescale, 剩余文本)。
+
+    用法示例：
+      /画图 正面: 1girl --scale 7 --rescale 0.5 负面: chibi
+    """
+    scale: Optional[float] = None
+    cfg_rescale: Optional[float] = None
+
+    def _replace(m: _re.Match) -> str:  # type: ignore[type-arg]
+        nonlocal scale, cfg_rescale
+        raw_scale, raw_rescale = m.group(1), m.group(2)
+        if raw_scale is not None:
+            try:
+                scale = float(raw_scale)
+            except ValueError:
+                pass
+        if raw_rescale is not None:
+            try:
+                cfg_rescale = float(raw_rescale)
+            except ValueError:
+                pass
+        return ""
+
+    cleaned = _FLAG_PATTERN.sub(_replace, text).strip()
+    cleaned = _re.sub(r" {2,}", " ", cleaned)
+    return scale, cfg_rescale, cleaned
+
+
+def _split_prompt(text: str) -> tuple[str, Optional[str]]:
+    """按"正面:/负面:"关键字切分正负面提示词。
+
+    兼容半角冒号(:)和全角冒号(：)，支持格式：
+      正面: 1girl  负面: chibi
+      正面：1girl  负面：chibi
+      1girl, pink hair  负面: chibi
+      1girl, pink hair
+    """
+    neg_m = _NEG_KW_RE.search(text)
+    if neg_m:
+        pos_part = text[:neg_m.start()]
+        neg = text[neg_m.end():]
+        # 去掉正面部分可能存在的"正面:/："前缀
+        pos_m = _POS_KW_RE.search(pos_part)
+        if pos_m:
+            pos_part = pos_part[pos_m.end():]
+        return pos_part.strip(), neg.strip() if neg.strip() else None
+    # 没有负面关键字，检查是否有正面关键字
+    pos_m = _POS_KW_RE.search(text)
+    if pos_m:
+        return text[pos_m.end():].strip(), None
+    return text.strip(), None
+
+
+# ═════════════════════════════════════════════════════════════════════════
 #  画幅/预设映射
 # ═════════════════════════════════════════════════════════════════════════
 
@@ -195,12 +265,24 @@ class ImageGeneratorCommand(BaseCommand):
       /nai_image draw <提示词>                 - 方图 (1024x1024)
       /nai_image draw 横图 <提示词>            - 横图 (1216x832)
       /nai_image draw 竖图 <提示词>            - 竖图 (832x1216)
-      /nai_image draw <提示词> ---<负面词>     - 自定义负面提示词
+      /nai_image draw <提示词> || <负面词>    - 自定义负面提示词
+      /画图 <提示词>                           - 中文别名
     """
 
     command_name: str = "nai_image"
     command_description: str = "NovelAI 文生图 - 根据提示词生成图片"
+    command_aliases: list[str] = ["画图", "生图"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
+
+    @classmethod
+    def match(cls, parts: list[str]) -> int:
+        """匹配命令名或中文别名。"""
+        result = super().match(parts)
+        if result:
+            return result
+        if parts and parts[0] in cls.command_aliases:
+            return 1
+        return 0
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
@@ -220,7 +302,10 @@ class ImageGeneratorCommand(BaseCommand):
         return await self._do_draw(rest)
 
     async def _do_draw(self, raw_text: str) -> tuple[bool, str]:
-        """文生图核心处理：[画幅] <提示词> [---负面词]"""
+        """文生图核心处理：[画幅] <提示词> [|| 负面词] [--scale X] [--rescale X]"""
+        # ── 先提取 --scale / --rescale 标志 ──
+        scale, cfg_rescale, raw_text = _extract_flags(raw_text)
+
         all_args = raw_text.split() if raw_text.strip() else []
         if not all_args:
             await send_text(
@@ -275,14 +360,8 @@ class ImageGeneratorCommand(BaseCommand):
             )
             return False, "缺少提示词"
 
-        # 解析正负面提示词
-        if "---" in prompt_raw:
-            parts = prompt_raw.split("---", 1)
-            prompt = parts[0].strip()
-            negative_prompt: str | None = parts[1].strip() if len(parts) > 1 else None
-        else:
-            prompt = prompt_raw.strip()
-            negative_prompt = None
+        # 按分隔符切分正负面提示词
+        prompt, negative_prompt = _split_prompt(prompt_raw)
 
         # 应用预设
         if preset_prefix or preset_suffix:
@@ -311,6 +390,8 @@ class ImageGeneratorCommand(BaseCommand):
                 height=height,
                 is_img2img=False,
                 from_command=True,
+                scale=scale,
+                cfg_rescale=cfg_rescale,
             )
 
             if success and image_path:
@@ -354,12 +435,24 @@ class ImageEditCommand(BaseCommand):
     用法：
       /nai_edit edit <提示词> [强度:0.1-0.99]   - 标准用法
       /nai_edit <提示词> [强度:0.1-0.99]        - 省略 edit 子命令
+      /改图 <提示词> [强度]                     - 中文别名
     需要引用一张图片。
     """
 
     command_name: str = "nai_edit"
     command_description: str = "NovelAI 图生图 - 基于引用图片进行编辑"
+    command_aliases: list[str] = ["改图", "修图"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
+
+    @classmethod
+    def match(cls, parts: list[str]) -> int:
+        """匹配命令名或中文别名。"""
+        result = super().match(parts)
+        if result:
+            return result
+        if parts and parts[0] in cls.command_aliases:
+            return 1
+        return 0
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
@@ -465,12 +558,226 @@ class ImageEditCommand(BaseCommand):
         return prompt, strength
 
     async def _extract_image_from_reply(self) -> Optional[str]:
-        """从引用消息中提取图片的 base64 编码。
+        """从当前消息（含引用）中提取图片的 base64 编码。
 
-        TODO: 需要根据框架实际的消息结构来实现
+        框架在解析消息时已将引用消息内的图片解码为 base64 存入
+        message.content["media"]，这里直接读取即可。
         """
-        logger.warning("图生图功能暂未实现，需要框架支持获取引用消息中的图片")
+        if self._message is None:
+            logger.warning("_message 未注入，无法提取图片")
+            return None
+
+        content = self._message.content
+        if not isinstance(content, dict):
+            return None
+
+        for media in content.get("media", []):
+            if isinstance(media, dict) and media.get("type") == "image":
+                return media.get("data")
+
         return None
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  精确参考命令
+# ═════════════════════════════════════════════════════════════════════════
+
+# 精确参考默认参数
+_REF_DEFAULT_FIDELITY = 1.0   # 徺实度：越高越严格匹配参考图（SDK 默认 1.0）
+_REF_DEFAULT_STRENGTH = 1.0   # 参考强度：越高越接近参考图风格（SDK 默认 1.0）
+_REF_DEFAULT_TYPE = "character&style"  # 参考类型：同时参考人物和风格
+
+# 参考类型中英文映射
+_TYPE_MAP: dict[str, str] = {
+    # 人物
+    "角色": "character",
+    "人物": "character",
+    "character": "character",
+    "char": "character",
+    # 风格
+    "风格": "style",
+    "style": "style",
+    # 两者
+    "两者": "character&style",
+    "全部": "character&style",
+    "both": "character&style",
+    "all": "character&style",
+    "character&style": "character&style",
+}
+
+
+class ImageRefCommand(BaseCommand):
+    """精密参考图命令。
+
+    引用（回复）一张图片，再发此命令，将该图片作为 NAI 精密参考（Director Reference）
+    参与文生图，与图生图（img2img）不同——不直接重绘，而是将图片的人物/风格特征与文生图融合。
+
+    用法：
+      /nai_ref [ref] <提示词> [--type X] [--fidelity X] [--strength X]
+      /参考图 <提示词> [--type X] [--fidelity X] [--strength X]
+
+    参数：
+      --type X         参考类型：角色/风格/两者（默认：两者）
+      --参考类型 X  --type 的中文别名
+      --fidelity X     徺实度 0.0~1.0（默认 1.0，越高越严格匹配参考图）
+      --strength X     参考强度 0.0~1.0（默认 1.0，越高风格越接近参考图）
+    """
+
+    command_name: str = "nai_ref"
+    command_description: str = "精确参考图生图（引用图片+提示词）"
+    command_aliases: list[str] = ["参考图"]
+    permission_level: PermissionLevel = PermissionLevel.OPERATOR
+
+    @classmethod
+    def match(cls, parts: list[str]) -> int:
+        """匹配命令名或中文别名。"""
+        result = super().match(parts)
+        if result:
+            return result
+        if parts and parts[0] in cls.command_aliases:
+            return 1
+        return 0
+
+    async def execute(self, message_text: str) -> tuple[bool, str]:
+        """入口路由：/nai_ref [ref] <提示词> 或直接 /参考图 <提示词>。"""
+        text = message_text.strip()
+        parts = text.split(maxsplit=1)
+        if parts and parts[0].lower() == "ref":
+            rest = parts[1] if len(parts) > 1 else ""
+        else:
+            rest = text
+        return await self._do_ref(rest)
+
+    async def _do_ref(self, raw_text: str) -> tuple[bool, str]:
+        """精确参考图核心处理。"""
+        if not raw_text.strip():
+            await send_text(
+                "引用一张图片，再告诉我要画什么，我会参考那张图的风格来生成",
+                stream_id=self.stream_id,
+            )
+            return False, "缺少参数"
+
+        # 提取参考图
+        image_b64 = await self._extract_image_from_reply()
+        if not image_b64:
+            await send_text(
+                "需要引用一张图片才能精确参考哦，回复一张图片再发命令试试",
+                stream_id=self.stream_id,
+            )
+            return False, "未找到引用图片"
+
+        # 提取参数
+        fidelity, strength_ref, ref_type, cleaned = self._parse_ref_flags(raw_text)
+        scale, cfg_rescale, cleaned = _extract_flags(cleaned)
+        prompt, negative_prompt = _split_prompt(cleaned)
+
+        if not prompt:
+            await send_text("提示词不能为空哦~", stream_id=self.stream_id)
+            return False, "提示词为空"
+
+        try:
+            service = self._get_service()
+            if not service:
+                raise RuntimeError("ImageGeneratorService 未初始化")
+
+            type_display = {"character": "角色", "style": "风格", "character&style": "两者"}.get(ref_type, ref_type)
+            await send_text(
+                f"好的，参考那张图来生成（类型={type_display}, 徺实度={fidelity:.1f}, 强度={strength_ref:.1f}）",
+                stream_id=self.stream_id,
+            )
+
+            reference_images = [{"data": image_b64, "fidelity": fidelity, "strength": strength_ref, "type": ref_type}]
+
+            success, message, image_path = await service.generate_image(
+                prompt=prompt,
+                user_id="command_user",
+                is_img2img=False,
+                negative_prompt=negative_prompt,
+                scale=scale,
+                cfg_rescale=cfg_rescale,
+                reference_images=reference_images,
+            )
+
+            if success and image_path:
+                ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
+                if ok and img_b64:
+                    await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
+                    await send_text(
+                        pick(EDIT_SUCCESS_HINTS, "edit_success"),
+                        stream_id=self.stream_id,
+                    )
+                    ImageUtils.cleanup_temp_file(image_path, keep_file=True)
+                    return True, "精确参考生成成功"
+                await send_text(
+                    pick(ERROR_HINTS, "error").format(error=humanize_error(msg)),
+                    stream_id=self.stream_id,
+                )
+                return False, msg
+            await send_text(
+                pick(GENERATE_ERROR_HINTS, "gen_error").format(error=humanize_error(message)),
+                stream_id=self.stream_id,
+            )
+            return False, message
+
+        except Exception as e:
+            logger.error(f"执行 /nai_ref 命令时出错: {e}", exc_info=True)
+            await send_text(
+                pick(ERROR_HINTS, "error").format(error=humanize_error(str(e))),
+                stream_id=self.stream_id,
+            )
+            return False, "命令执行异常"
+
+    def _get_service(self) -> Optional[ImageGeneratorService]:
+        """从插件实例获取图片生成服务。"""
+        return getattr(self.plugin, "image_service", None)
+
+    async def _extract_image_from_reply(self) -> Optional[str]:
+        """从当前消息（含引用）中提取图片的 base64 编码。"""
+        if self._message is None:
+            return None
+        content = self._message.content
+        if not isinstance(content, dict):
+            return None
+        for media in content.get("media", []):
+            if isinstance(media, dict) and media.get("type") == "image":
+                return media.get("data")
+        return None
+
+    def _parse_ref_flags(self, text: str) -> tuple[float, float, str, str]:
+        """解析 --type/--参考类型、--fidelity、--strength 标志，返回 (fidelity, strength, ref_type, 剩余文本)。"""
+        import re as _re2
+
+        fidelity = _REF_DEFAULT_FIDELITY
+        strength = _REF_DEFAULT_STRENGTH
+        ref_type = _REF_DEFAULT_TYPE
+
+        pattern = _re2.compile(
+            r"--(?:type|参考类型)\s+(\S+)"
+            r"|--fidelity\s+([\d.]+)"
+            r"|--strength\s+([\d.]+)",
+            _re2.IGNORECASE,
+        )
+
+        def _replace(m: _re2.Match) -> str:  # type: ignore[type-arg]
+            nonlocal fidelity, strength, ref_type
+            if m.group(1) is not None:
+                raw = m.group(1).strip()
+                ref_type = _TYPE_MAP.get(raw, _REF_DEFAULT_TYPE)
+            if m.group(2) is not None:
+                try:
+                    fidelity = max(0.0, min(1.0, float(m.group(2))))
+                except ValueError:
+                    pass
+            if m.group(3) is not None:
+                try:
+                    strength = max(0.0, min(1.0, float(m.group(3))))
+                except ValueError:
+                    pass
+            return ""
+
+        cleaned = pattern.sub(_replace, text).strip()
+        cleaned = _re2.sub(r" {2,}", " ", cleaned)
+        return fidelity, strength, ref_type, cleaned
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -487,11 +794,23 @@ class VibeManagementCommand(BaseCommand):
       /nai_vibe status            - 当前 Vibe 设置
       /nai_vibe clear             - 清空 Vibe
       /nai_vibe info              - 查询账号信息
+      /风格 列表/添加/状态/清空/账号 - 中文别名
     """
 
     command_name: str = "nai_vibe"
     command_description: str = "Vibe 参考图管理"
+    command_aliases: list[str] = ["风格"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
+
+    @classmethod
+    def match(cls, parts: list[str]) -> int:
+        """匹配命令名或中文别名。"""
+        result = super().match(parts)
+        if result:
+            return result
+        if parts and parts[0] in cls.command_aliases:
+            return 1
+        return 0
 
     def _get_service(self) -> ImageGeneratorService | None:
         """获取服务实例。"""
@@ -560,3 +879,216 @@ class VibeManagementCommand(BaseCommand):
         success, message = await service.get_user_info()
         await send_text(message, stream_id=self.stream_id)
         return success, message
+
+    # ── 中文别名路由 ──
+
+    @cmd_route("列表")
+    async def handle_list_cn(self) -> tuple[bool, str]:
+        """列出素材库文件（中文别名：/风格 列表）。"""
+        return await self.handle_list()
+
+    @cmd_route("添加")
+    async def handle_add_cn(self, filename: str) -> tuple[bool, str]:
+        """添加 Vibe 素材（中文别名：/风格 添加 <文件名>）。"""
+        return await self.handle_add(filename)
+
+    @cmd_route("状态")
+    async def handle_status_cn(self) -> tuple[bool, str]:
+        """查看当前 Vibe 设置（中文别名：/风格 状态）。"""
+        return await self.handle_status()
+
+    @cmd_route("清空")
+    async def handle_clear_cn(self) -> tuple[bool, str]:
+        """清空所有 Vibe（中文别名：/风格 清空）。"""
+        return await self.handle_clear()
+
+    @cmd_route("账号")
+    async def handle_info_cn(self) -> tuple[bool, str]:
+        """查询账号信息（中文别名：/风格 账号）。"""
+        return await self.handle_info()
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  每日服装命令
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class WardrobeCommand(BaseCommand):
+    """每日服装系统管理命令。
+
+    用法：
+      /nai_wardrobe status                          - 查看今天三时段服装计划
+      /nai_wardrobe refresh                         - 强制重新生成今日服装
+      /nai_wardrobe list                            - 列出衣柜所有槽位和单品
+      /nai_wardrobe wear <item_id> [时段]           - 手动设置某槽位单品（当前时段或指定时段）
+      /nai_wardrobe preset <preset_id> [时段]       - 应用整套预设到某时段
+    """
+
+    command_name: str = "nai_wardrobe"
+    command_description: str = "每日服装系统 - 查看/刷新/手动设置今日穿搭"
+    permission_level: PermissionLevel = PermissionLevel.OPERATOR
+
+    def _get_manager(self):
+        """获取 wardrobe_manager，未启用时返回 None。"""
+        return getattr(self.plugin, "_wardrobe_manager", None)
+
+    @cmd_route("status")
+    async def handle_status(self) -> tuple[bool, str]:
+        """查看今天三个时段的服装计划。"""
+        wardrobe_manager = self._get_manager()
+        if wardrobe_manager is None:
+            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
+            return False, "服装系统未启用"
+
+        summary = wardrobe_manager.get_all_segments_summary()
+        await send_text(summary, stream_id=self.stream_id)
+        return True, "ok"
+
+    @cmd_route("list")
+    async def handle_list(self) -> tuple[bool, str]:
+        """列出衣柜中所有槽位和单品。"""
+        wardrobe_manager = self._get_manager()
+        if wardrobe_manager is None:
+            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
+            return False, "服装系统未启用"
+
+        wardrobe = wardrobe_manager.load_wardrobe()
+        slots = wardrobe.get("slots", {})
+        presets = wardrobe.get("presets", {})
+
+        if not slots:
+            await send_text("衣柜是空的！请编辑 wardrobe.json 添加槽位和单品。", stream_id=self.stream_id)
+            return True, "ok"
+
+        lines: list[str] = ["👗 衣柜内容：\n"]
+        for slot_name, items in slots.items():
+            lines.append(f"【{slot_name}】（{len(items)} 件）")
+            for item in items:
+                tags_preview = item.get("tags", "")[:50]
+                if len(item.get("tags", "")) > 50:
+                    tags_preview += "…"
+                lines.append(f"  [{item['id']}] {item.get('name', '')}  {tags_preview}")
+
+        if presets:
+            lines.append("\n📦 预设套装：")
+            for preset_id, preset in presets.items():
+                lines.append(f"  [{preset_id}] {preset.get('name', '')} - {preset.get('description', '')}")
+
+        await send_text("\n".join(lines), stream_id=self.stream_id)
+        return True, "ok"
+
+    @cmd_route("wear")
+    async def handle_wear(self, item_id: str = "", segment: str = "") -> tuple[bool, str]:
+        """手动将某单品设置到当前时段对应槽位。
+
+        用法：/nai_wardrobe wear <item_id> [daytime|evening|night]
+        系统会自动在衣柜中查找该 item_id 所属的槽位。
+        """
+        from ..wardrobe.outfit_generator import inject_outfit_hint
+        from ..wardrobe.outfit_manager import ALL_SEGMENTS, SEGMENT_DISPLAY_NAMES
+        from ..actions.draw_action import DrawAction
+
+        wardrobe_manager = self._get_manager()
+        if wardrobe_manager is None:
+            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
+            return False, "服装系统未启用"
+
+        if not item_id:
+            await send_text(
+                "用法：/nai_wardrobe wear <单品id> [daytime|evening|night]\n"
+                "使用 /nai_wardrobe list 查看所有单品 id。",
+                stream_id=self.stream_id,
+            )
+            return False, "缺少参数"
+
+        found = wardrobe_manager.find_item_globally(item_id)
+        if found is None:
+            await send_text(
+                f"找不到 id 为 {item_id!r} 的单品，请使用 /nai_wardrobe list 查看可用 id。",
+                stream_id=self.stream_id,
+            )
+            return False, "单品不存在"
+
+        slot_name, item = found
+        target_segment = segment.strip() if segment.strip() in ALL_SEGMENTS else wardrobe_manager.get_current_segment()
+
+        wardrobe_manager.override_segment_slot(target_segment, slot_name, item_id)
+        inject_outfit_hint(wardrobe_manager, DrawAction)
+
+        seg_name = SEGMENT_DISPLAY_NAMES.get(target_segment, target_segment)
+        await send_text(
+            f"✅ 已将{seg_name}的【{slot_name}】设置为：{item.get('name', item_id)}\n"
+            f"tags: {item.get('tags', '')}",
+            stream_id=self.stream_id,
+        )
+        return True, "ok"
+
+    @cmd_route("preset")
+    async def handle_preset(self, preset_id: str = "", segment: str = "") -> tuple[bool, str]:
+        """将整套预设应用到某时段。
+
+        用法：/nai_wardrobe preset <preset_id> [daytime|evening|night]
+        """
+        from ..wardrobe.outfit_generator import inject_outfit_hint
+        from ..wardrobe.outfit_manager import ALL_SEGMENTS, SEGMENT_DISPLAY_NAMES
+        from ..actions.draw_action import DrawAction
+
+        wardrobe_manager = self._get_manager()
+        if wardrobe_manager is None:
+            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
+            return False, "服装系统未启用"
+
+        if not preset_id:
+            presets = wardrobe_manager.get_presets()
+            if not presets:
+                await send_text("衣柜中没有任何预设，请在 wardrobe.json 的 presets 中定义。", stream_id=self.stream_id)
+            else:
+                lines = ["可用预设："]
+                for pid, p in presets.items():
+                    lines.append(f"  [{pid}] {p.get('name', '')} - {p.get('description', '')}")
+                await send_text("\n".join(lines), stream_id=self.stream_id)
+            return False, "缺少参数"
+
+        target_segment = segment.strip() if segment.strip() in ALL_SEGMENTS else wardrobe_manager.get_current_segment()
+        success = wardrobe_manager.apply_preset(preset_id, target_segment)
+        if not success:
+            await send_text(f"预设 {preset_id!r} 不存在，使用 /nai_wardrobe preset 查看可用预设。", stream_id=self.stream_id)
+            return False, "预设不存在"
+
+        inject_outfit_hint(wardrobe_manager, DrawAction)
+        seg_name = SEGMENT_DISPLAY_NAMES.get(target_segment, target_segment)
+        presets = wardrobe_manager.get_presets()
+        preset_name = presets.get(preset_id, {}).get("name", preset_id)
+        await send_text(f"✅ 已将{seg_name}的穿搭设为预设「{preset_name}」", stream_id=self.stream_id)
+        return True, "ok"
+
+    @cmd_route("refresh")
+    async def handle_refresh(self) -> tuple[bool, str]:
+        """强制重新生成今日服装（覆盖已有数据）。"""
+        from ..config import ImageGeneratorConfig
+        from ..wardrobe.outfit_generator import generate_daily_outfit, inject_outfit_hint
+        from ..actions.draw_action import DrawAction
+
+        wardrobe_manager = self._get_manager()
+        if wardrobe_manager is None:
+            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
+            return False, "服装系统未启用"
+
+        cfg = self.plugin.config
+        if not isinstance(cfg, ImageGeneratorConfig):
+            return False, "配置异常"
+
+        await send_text("正在重新生成今日服装计划，稍等…", stream_id=self.stream_id)
+
+        # 删除旧状态强制重新生成
+        wardrobe_manager.state_file.unlink(missing_ok=True)
+
+        ok = await generate_daily_outfit(wardrobe_manager, cfg)
+        if not ok:
+            await send_text("服装生成失败了，请检查衣柜配置（wardrobe.json）是否正确。", stream_id=self.stream_id)
+            return False, "生成失败"
+
+        inject_outfit_hint(wardrobe_manager, DrawAction)
+        summary = wardrobe_manager.get_all_segments_summary()
+        await send_text(f"✅ 今日服装已更新！\n\n{summary}", stream_id=self.stream_id)
+        return True, "ok"

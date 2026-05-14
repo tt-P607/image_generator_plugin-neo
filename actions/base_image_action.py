@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.send_api import send_image
-from src.core.components.base.action import BaseAction
+from src.app.plugin_system.base import BaseAction
 
 from ..utils.image_utils import ImageUtils
 
@@ -27,6 +27,28 @@ class BaseImageAction(BaseAction):
 
     封装图片生成和发送的通用逻辑。
     """
+
+    # 由插件 on_plugin_loaded 注入，供 to_schema() 动态拼入参数描述
+    _preset_negative_prompt: str = ""
+
+    @classmethod
+    def to_schema(cls) -> dict[str, Any]:
+        """生成 LLM Tool Schema，动态注入预设负面提示词说明。"""
+        schema = super().to_schema()
+        if cls._preset_negative_prompt:
+            props = (
+                schema.get("function", {})
+                .get("parameters", {})
+                .get("properties", {})
+            )
+            if "negative_prompt" in props:
+                props["negative_prompt"]["description"] = (
+                    f"场景专属额外排除词，英文逗号分隔。"
+                    f"系统已内置：{cls._preset_negative_prompt}。"
+                    f"此处只填本次图片特有的排除内容。"
+                )
+        return schema
+
 
     def get_service(self) -> Optional["ImageGeneratorService"]:
         """获取图片生成服务实例。
@@ -48,6 +70,7 @@ class BaseImageAction(BaseAction):
         success_message: str = "[内部：已发送图片]",
         error_prefix: str = "生成失败",
         selected_vibe_names: Optional[list[str]] = None,
+        character_prompts: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[bool, str]:
         """生成图片并发送（统一封装方法）。
 
@@ -59,6 +82,7 @@ class BaseImageAction(BaseAction):
             success_message: 成功时返回的消息
             error_prefix: 错误消息前缀
             selected_vibe_names: LLM 选择的可选 Vibe 名称列表
+            character_prompts: 多人物列表（仅 V4 系列模型支持），格式见 service.generate_image
 
         Returns:
             (是否成功, 消息)
@@ -68,33 +92,67 @@ class BaseImageAction(BaseAction):
             return False, "图片生成服务不可用"
 
         # 从 chat_stream 获取用户信息
-        user_id = self.chat_stream.context.triggering_user_id or ""
-        group_id = self.chat_stream.extra.get("group_id") if hasattr(self.chat_stream, "extra") else None
+
+        chat_context = getattr(self.chat_stream, "context", None)
+        user_id = chat_context.triggering_user_id if chat_context else ""
+        extra_data = getattr(self.chat_stream, "extra", {})
+        group_id = extra_data.get("group_id")
 
         logger.info(f"生成图片 - 提示词: {prompt}")
-        try:
-            success, msg, image_path = await service.generate_image(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                user_id=str(user_id),
-                group_id=str(group_id) if group_id else None,
-                selected_vibe_names=selected_vibe_names,
-            )
 
-            if success and image_path:
-                return await self.read_and_send_image(
-                    image_path,
-                    success_message=success_message,
-                    keep_file=True,
+        task_state = {"cancelled": False}
+
+        async def _core_task() -> tuple[bool, str]:
+            try:
+                success, msg, image_path = await service.generate_image(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=width,
+                    height=height,
+                    user_id=str(user_id),
+                    group_id=str(group_id) if group_id else None,
+                    selected_vibe_names=selected_vibe_names,
+                    character_prompts=character_prompts,
                 )
-            logger.error(f"图片生成失败: {msg}")
-            return False, f"{error_prefix}: {msg}"
 
-        except Exception as e:
-            logger.error(f"生成图片异常: {e}", exc_info=True)
-            return False, f"{error_prefix}: {e}"
+                if success and image_path:
+                    success_result, image_msg = await self.read_and_send_image(
+                        image_path,
+                        success_message=success_message,
+                        keep_file=True,
+                    )
+                    return success_result, image_msg
+
+                # Failed generate
+                logger.error(f"图片生成失败: {msg}")
+                err_msg = f"{error_prefix}: {msg}"
+                if task_state["cancelled"]:
+                    from src.app.plugin_system.api.send_api import send_text
+                    await send_text(err_msg, stream_id=self.chat_stream.stream_id)  # 后台补偿发送错误给用户
+                return False, err_msg
+
+            except Exception as e:
+                logger.error(f"生图动作后台异常: {e}", exc_info=True)
+                err_msg = f"发生异常: {e}"
+                if task_state["cancelled"]:
+                    from src.app.plugin_system.api.send_api import send_text
+                    await send_text(f"{error_prefix}: {err_msg}", stream_id=self.chat_stream.stream_id)
+                return False, f"{error_prefix}: {e}"
+
+        from src.kernel.concurrency.task_manager import get_task_manager
+        import asyncio
+        tm = get_task_manager()
+        task_info = tm.create_task(_core_task(), name=f"draw_action_{user_id}")
+
+        if task_info.task is None:
+            return False, "后台生图任务创建失败"
+
+        try:
+            return await asyncio.shield(task_info.task)
+        except asyncio.CancelledError:
+            task_state["cancelled"] = True
+            logger.warning(f"生成图片(_core_task)等候被取消，进入后台保护执行直至发放结果。")
+            raise
 
     async def read_and_send_image(
         self,
