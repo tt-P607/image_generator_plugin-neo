@@ -2,10 +2,6 @@
 
 支持文生图、图生图、Vibe 参考图等功能。
 使用任务队列串行化所有生图请求，防止 429 封号。
-
-架构设计（两步式）：
-- Tool（draw_image）：轻量入口，模型日常只看到简单的 tool schema
-- Action（draw_image）：Tool 被调用后暴露，携带完整提示词语法和预设信息
 """
 
 from __future__ import annotations
@@ -23,7 +19,6 @@ from .commands.image_command import (
 )
 from .config import ImageGeneratorConfig
 from .services.image_service import ImageGeneratorService
-from .tools.draw_image_tool import DrawImageTool
 
 logger = get_logger("image_generator_plugin")
 
@@ -33,7 +28,6 @@ class ImageGeneratorPlugin(BasePlugin):
     """NovelAI 图片生成插件。
 
     支持文生图、图生图、Vibe 参考图等功能。
-    两步式架构：Tool 作为轻量入口，Action 携带详细生图参数。
     """
 
     plugin_name: str = "image_generator_plugin"
@@ -83,19 +77,17 @@ class ImageGeneratorPlugin(BasePlugin):
         Args:
             cfg: 插件配置实例
         """
-        # 1. 正面质量标签预设
-        quality_prefix = cfg.generation.quality_prefix.strip()
-        quality_suffix = cfg.generation.quality_suffix.strip()
-        if quality_prefix or quality_suffix:
-            quality_block = "【正面预设标签（系统自动拼接，无需手动添加）】"
-            if quality_prefix:
-                quality_block += f"\n  前缀：{quality_prefix}"
-            if quality_suffix:
-                quality_block += f"\n  后缀：{quality_suffix}"
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip() + "\n\n" + quality_block
+        # 1. 画风标签预设（强制拼接）
+        style_ref = cfg.generation.style_reference.strip()
+        if style_ref:
+            style_block = (
+                "【画风标签（系统自动拼接到提示词最前面，无需手动添加）】\n"
+                f"  {style_ref}"
             )
-            logger.debug("已将正面质量标签注入 Action description")
+            DrawAction.action_description = (
+                DrawAction.action_description.rstrip() + "\n\n" + style_block
+            )
+            logger.debug("已将画风标签注入 Action description")
 
         # 2. 预设负面提示词
         preset_negative = cfg.generation.negative_prompt.strip()
@@ -108,14 +100,14 @@ class ImageGeneratorPlugin(BasePlugin):
             )
             logger.debug("已将预设负面提示词注入 Action description")
 
-        # 3. 角色特征标签
+        # 3. 角色外观描述
         character_prompt = cfg.generation.character_prompt.strip()
         if character_prompt:
             DrawAction.action_description = (
                 DrawAction.action_description.rstrip()
-                + f"\n\n【内置角色参考标签（画自己时使用，可按需选用）】\n{character_prompt}"
+                + f"\n\n【角色外观描述（画自己时参考）】\n{character_prompt}"
             )
-            logger.debug("已将 character_prompt 注入 Action description")
+            logger.debug("已将角色外观描述注入 Action description")
 
         # 4. 结构化预设列表
         if cfg.prompt.presets:
@@ -230,7 +222,6 @@ class ImageGeneratorPlugin(BasePlugin):
         """获取插件内所有组件类。
 
         根据配置决定是否启用各组件。
-        两步式架构：Tool 作为日常入口，Action 作为执行器。
         """
         cfg = self.config
         if not isinstance(cfg, ImageGeneratorConfig) or not cfg.plugin.enabled:
@@ -238,11 +229,7 @@ class ImageGeneratorPlugin(BasePlugin):
 
         components: list[type] = []
 
-        # Tool 组件（轻量入口，模型日常可见）
-        if cfg.components.tool_enabled:
-            components.append(DrawImageTool)
-
-        # Action 组件（Tool 调用后暴露，执行实际生图）
+        # Action 组件（执行实际生图）
         if cfg.components.action_enabled:
             components.append(DrawAction)
 

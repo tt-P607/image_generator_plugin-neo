@@ -78,13 +78,9 @@ class ImageGeneratorConfig(BaseConfig):
     class ComponentsSection(SectionBase):
         """组件开关配置。"""
 
-        tool_enabled: bool = Field(
-            default=True,
-            description="是否启用 Tool 组件（轻量入口，模型日常可见的画图工具）",
-        )
         action_enabled: bool = Field(
             default=True,
-            description="是否启用 Action 组件（实际执行生图，Tool 调用后暴露）",
+            description="是否启用 Action 组件（实际执行生图）",
         )
         command_enabled: bool = Field(
             default=True,
@@ -159,18 +155,12 @@ class ImageGeneratorConfig(BaseConfig):
                 "开启后引导只在主体成型后介入，增加出图多样性，但提示词贴合度会略有下降。"
             ),
         )
-        quality_prefix: str = Field(
-            default="masterpiece, best quality, ultra detailed, official art, 1.3::very aesthetic::",
+        style_reference: str = Field(
+            default="",
             description=(
-                "正面质量前缀标签，自动拼接到所有提示词最前面。"
-                "用于统一画面质量基调，可根据模型特性调整。"
-            ),
-        )
-        quality_suffix: str = Field(
-            default="beautiful lighting",
-            description=(
-                "正面质量后缀标签，自动拼接到所有提示词最后面。"
-                "用于统一光影/氛围收尾。"
+                "画风标签，自动拼接到所有提示词最前面。"
+                "用于统一画面风格基调，可根据模型特性调整。"
+                "例如：'1.2::honkai impact 3rd (game cg)::, smooth shading, luminous skin'"
             ),
         )
         negative_prompt: str = Field(
@@ -187,8 +177,12 @@ class ImageGeneratorConfig(BaseConfig):
             ),
         )
         character_prompt: str = Field(
-            default="1girl, beautiful detailed eyes, long pink hair, blue eyes, elf ears",
-            description="AI 自拍功能的角色特征锚定（用于生成 Bot 自己的照片，确保生成的是特定角色外观）",
+            default="",
+            description=(
+                "角色外观描述（自由文本），用于告诉模型 Bot 自己长什么样。"
+                "画自己/自拍时模型会参考此描述来构建提示词。"
+                "可以用自然语言描述外貌特征，也可以直接写标签，格式不限。"
+            ),
         )
         always_use_coords: bool = Field(
             default=True,
