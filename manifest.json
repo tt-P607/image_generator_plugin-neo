@@ -9,13 +9,13 @@
     },
     "include": [
         {
-            "component_type": "action",
+            "component_type": "tool",
             "component_name": "draw_image",
             "dependencies": []
         },
         {
             "component_type": "action",
-            "component_name": "generate_selfie",
+            "component_name": "draw_image",
             "dependencies": []
         },
         {
@@ -48,6 +48,7 @@
     "min_core_version": "1.0.0",
     "python_dependencies": [
         "aiohttp",
-        "pillow>=12.1.0"
+        "pillow>=12.1.0",
+        "holidays"
     ]
 }

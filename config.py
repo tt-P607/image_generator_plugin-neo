@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
+from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
 
 class VibeItemConfig(SectionBase):
@@ -17,6 +17,13 @@ class VibeItemConfig(SectionBase):
     file: str = Field(
         description="vibes/ 目录下的文件名（支持 .naiv4vibe / .naiv4vibebundle / .png / .jpg）",
     )
+    description: str = Field(
+        default="",
+        description=(
+            "该 Vibe 的场景描述，告诉模型什么时候适合使用此画风。"
+            "例如：'适合赛博朋克、科幻、迷幻场景' 或 '适合温馨日常、治愈系场景'"
+        ),
+    )
     ie: float = Field(
         default=1.0,
         description="information_extracted：提取的信息量（0.0–1.0）",
@@ -24,6 +31,31 @@ class VibeItemConfig(SectionBase):
     strength: float = Field(
         default=0.6,
         description="参考强度（0.0–1.0）",
+    )
+
+
+class PromptPresetConfig(SectionBase):
+    """单条提示词预设配置。
+
+    用于定义特定场景下的生图指令，模型会根据 trigger 条件判断是否应用。
+    """
+
+    name: str = Field(
+        description="预设名称，如 '自拍模式'、'表情包模式'",
+    )
+    trigger: str = Field(
+        default="",
+        description=(
+            "触发条件描述，告诉模型什么时候应该使用此预设。"
+            "例如：'画自己/自拍时' 或 '用户要表情包时'"
+        ),
+    )
+    content: str = Field(
+        default="",
+        description=(
+            "预设内容，具体的提示词指令。"
+            "例如：'必须包含角色标签 xxx (source)，优先使用当前时段服装标签'"
+        ),
     )
 
 
@@ -46,9 +78,13 @@ class ImageGeneratorConfig(BaseConfig):
     class ComponentsSection(SectionBase):
         """组件开关配置。"""
 
+        tool_enabled: bool = Field(
+            default=True,
+            description="是否启用 Tool 组件（轻量入口，模型日常可见的画图工具）",
+        )
         action_enabled: bool = Field(
             default=True,
-            description="是否启用 Action 组件（LLM Tool Calling 画图）",
+            description="是否启用 Action 组件（实际执行生图，Tool 调用后暴露）",
         )
         command_enabled: bool = Field(
             default=True,
@@ -101,16 +137,44 @@ class ImageGeneratorConfig(BaseConfig):
             description="引导比例",
         )
         sampler: str = Field(
-            default="k_euler",
+            default="k_euler_ancestral",
             description="采样器",
         )
         prompt_guidance_rescale: float = Field(
             default=0.0,
             description="提示词引导重新缩放比例",
         )
+        uc_preset: int = Field(
+            default=0,
+            description=(
+                "Undesired Content 预设（官网 UC Preset 下拉）。"
+                "0=Strong（默认通用质量负面词），1=Light，2=Furry Focus，"
+                "3=Human Focus（推荐正常比例人物，防止 Q 版），4=None（不追加）。"
+            ),
+        )
+        variety_plus: bool = Field(
+            default=False,
+            description=(
+                "是否启用 Variety+（skip_cfg_above_sigma）。"
+                "开启后引导只在主体成型后介入，增加出图多样性，但提示词贴合度会略有下降。"
+            ),
+        )
+        quality_prefix: str = Field(
+            default="masterpiece, best quality, ultra detailed, official art, 1.3::very aesthetic::",
+            description=(
+                "正面质量前缀标签，自动拼接到所有提示词最前面。"
+                "用于统一画面质量基调，可根据模型特性调整。"
+            ),
+        )
+        quality_suffix: str = Field(
+            default="beautiful lighting",
+            description=(
+                "正面质量后缀标签，自动拼接到所有提示词最后面。"
+                "用于统一光影/氛围收尾。"
+            ),
+        )
         negative_prompt: str = Field(
             default=(
-                "nsfw, nude, naked, r18, porn, sexual, explicit, adult content, "
                 "bad anatomy, extra fingers, six fingers, mutated hands, poorly drawn hands, "
                 "extra limbs, disfigured, malformed, missing fingers, extra digit, fewer digits, "
                 "bad proportions, deformed, worst quality, low quality, normal quality, "
@@ -118,13 +182,21 @@ class ImageGeneratorConfig(BaseConfig):
                 "brand name, copyright name, artist name, fake watermark"
             ),
             description=(
-                "通用负面提示词（禁止 NSFW/R18 内容，防止肢体扭曲如六指等，"
+                "全局负面提示词（防止肢体扭曲如六指等，"
                 "禁止 logo 和水印，AI 会在此基础上添加特殊场景的负面词）"
             ),
         )
         character_prompt: str = Field(
             default="1girl, beautiful detailed eyes, long pink hair, blue eyes, elf ears",
             description="AI 自拍功能的角色特征锚定（用于生成 Bot 自己的照片，确保生成的是特定角色外观）",
+        )
+        always_use_coords: bool = Field(
+            default=True,
+            description=(
+                "多人物生图时是否始终启用坐标定位（use_coords=true）。"
+                "开启后 LLM 提供的 (x, y) 严格生效；关闭则交给模型自由排布，"
+                "建议保持开启以匹配 NovelAI Web UI multi-character workspace 行为。"
+            ),
         )
 
     @config_section("advanced")
@@ -151,18 +223,38 @@ class ImageGeneratorConfig(BaseConfig):
             default=0.7,
             description="图生图默认强度",
         )
+        max_characters: int = Field(
+            default=6,
+            description=(
+                "单次生图允许的最大角色数（NovelAI Web UI multi-character workspace 默认上限为 6，"
+                "超过该数量会被拒绝；仅 V4 系列模型支持，V3 调用多人物会直接报错）。"
+            ),
+        )
 
     @config_section("prompt")
     class PromptSection(SectionBase):
-        """自定义提示词配置。"""
+        """提示词与预设配置。
+
+        支持三种方式向模型注入生图指引：
+        - custom_instructions：自由文本区块，用户可写任意指引内容
+        - presets：结构化预设列表，每条带名称、触发条件、具体内容
+        """
 
         custom_instructions: str = Field(
             default="",
             description=(
-                "追加到 draw_image 和 generate_selfie 两个 action 描述末尾的自定义指令。\n"
-                "可描述希望 AI 主动使用这两个功能的具体场景，"
-                "例如：用户想要表情包、壁纸、特定内容的图片时主动生成。\n"
-                "不会覆盖已有的触发条件，只是扩充场景说明。"
+                "自定义提示词指引（自由文本），会原样追加到 Action description 末尾。\n"
+                "可以写任何你想让模型在画图时遵循的规则或偏好，\n"
+                "例如：画风偏好、禁止事项、特殊场景处理方式等。\n"
+                "支持多行，内容会直接展示给模型。"
+            ),
+        )
+        presets: list[PromptPresetConfig] = Field(
+            default_factory=list,
+            description=(
+                "结构化预设列表，每条预设包含名称、触发条件和具体内容。\n"
+                "模型会根据触发条件判断当前场景是否适用该预设。\n"
+                "例如：自拍模式、表情包模式、风景模式等。"
             ),
         )
 
@@ -171,12 +263,12 @@ class ImageGeneratorConfig(BaseConfig):
         """Vibe 参考图注入配置。
 
         - always：每次生图都注入，适合固定风格底图。
-        - selectable：供 LLM 按场景自选，文件名即画风名。
+        - selectable：供 LLM 按场景自选，带场景描述帮助模型选择。
         """
 
         always_enabled: bool = Field(
             default=False,
-            description="启用始终注入模式（every次生图都注入 always 列表中的 Vibe）",
+            description="启用始终注入模式（每次生图都注入 always 列表中的 Vibe）",
         )
         selectable_enabled: bool = Field(
             default=False,
@@ -188,7 +280,52 @@ class ImageGeneratorConfig(BaseConfig):
         )
         selectable: list[VibeItemConfig] = Field(
             default_factory=list,
-            description="LLM 可自选的 Vibe 列表（文件名即画风名，selectable_enabled=true 时生效）",
+            description="LLM 可自选的 Vibe 列表（selectable_enabled=true 时生效，带场景描述帮助模型选择）",
+        )
+
+    @config_section("wardrobe")
+    class WardrobeSection(SectionBase):
+        """每日服装系统配置。
+
+        混合模式：用户在 wardrobe_file 中手动定义衣柜（精确 tags），
+        每天由 LLM 根据季节/日期类型从衣柜中选择最合适的三时段搭配。
+        """
+
+        enabled: bool = Field(
+            default=False,
+            description="是否启用每日服装系统",
+        )
+        refresh_time: str = Field(
+            default="06:00",
+            description="每天刷新服装的时间（HH:MM 24h 格式）",
+        )
+        generate_model: str = Field(
+            default="",
+            description="选择服装所用模型名称（对应 model.toml 里的 name）；留空使用 ACTOR 任务默认模型",
+        )
+        wardrobe_file: str = Field(
+            default="data/image_generator_plugin/wardrobe.json",
+            description="衣柜定义文件路径（用户手动维护，定义所有可选套装）",
+        )
+        state_file: str = Field(
+            default="data/image_generator_plugin/wardrobe_state.json",
+            description="每日穿搭状态文件路径（系统自动更新，记录今天选择了哪套）",
+        )
+        daytime_start: int = Field(
+            default=6,
+            description="白天时段起始小时（含，24h）",
+        )
+        evening_start: int = Field(
+            default=18,
+            description="傍晚时段起始小时（含，24h）",
+        )
+        night_start: int = Field(
+            default=22,
+            description="深夜时段起始小时（含，24h）",
+        )
+        holiday_aware: bool = Field(
+            default=False,
+            description="是否启用节假日感知（开启后会检测中国法定节假日，影响当天的穿搭选择）",
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
@@ -198,3 +335,4 @@ class ImageGeneratorConfig(BaseConfig):
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
     vibe: VibeSection = Field(default_factory=VibeSection)
+    wardrobe: WardrobeSection = Field(default_factory=WardrobeSection)

@@ -151,6 +151,69 @@ NovelAI V4 采用 `n::tag::` 语法：
 masterpiece, best quality, 1girl, 1.2::detailed eyes::
 ```
 
+### 多人物模式 (Multi-Character)
+
+V4 模型支持在同一张图片中指定多个不同特征的人物及其位置。
+若要在请求中启用多人物模式，需同步设置以下字段（缺一不可）：
+1. 开启全局 `use_coords` 和 `v4_prompt.use_coords` 为 `true`。
+2. 填写 `characterPrompts` 数组定义角色。
+3. 同步填充 `v4_prompt.caption.char_captions`（正面提示词关联）和 `v4_negative_prompt.caption.char_captions`（负面提示词关联）。
+
+**参数结构示意：**
+```json
+{
+  "parameters": {
+    "use_coords": true,
+    "v4_prompt": {
+      "use_coords": true,
+      "caption": {
+        "base_caption": "<全局正面提示词>",
+        "char_captions": [
+          {
+            "char_caption": "<人物A正面提示词>",
+            "centers": [{"x": 0.25, "y": 0.5}]
+          },
+          {
+            "char_caption": "<人物B正面提示词>",
+            "centers": [{"x": 0.75, "y": 0.5}]
+          }
+        ]
+      }
+    },
+    "v4_negative_prompt": {
+      "caption": {
+        "base_caption": "<全局负面提示词>",
+        "char_captions": [
+          {
+            "char_caption": "<人物A负面提示词>",
+            "centers": [{"x": 0.25, "y": 0.5}]
+          },
+          {
+            "char_caption": "<人物B负面提示词>",
+            "centers": [{"x": 0.75, "y": 0.5}]
+          }
+        ]
+      }
+    },
+    "characterPrompts": [
+      {
+        "prompt": "<人物A正面提示词>",
+        "uc": "<人物A负面提示词>",
+        "center": {"x": 0.25, "y": 0.5},
+        "enabled": true
+      },
+      {
+        "prompt": "<人物B正面提示词>",
+        "uc": "<人物B负面提示词>",
+        "center": {"x": 0.75, "y": 0.5},
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+*注：`x` 和 `y` 为相对于图片宽高的坐标比例 (0.0 - 1.0)。*
+
 ---
 
 ## 4. 文生图请求（V3 模型）
@@ -331,38 +394,85 @@ elif content[:4] == b"\x89PNG":   # PNG magic
 |--------|------|-----------|------|
 | `width` | int | 64–1600（64 的倍数） | 图片宽度，官方推荐 832/1024/1216 |
 | `height` | int | 64–1600（64 的倍数） | 图片高度，官方推荐 832/1024/1216 |
-| `scale` | float | 0–10 | CFG 引导比例 |
-| `steps` | int | 1–50 | 采样步数 |
-| `sampler` | string | 见下 | 采样器 |
-| `seed` | int | 0–999999999 | 随机种子 |
-| `n_samples` | int | 1–8 | 批量生成数量 |
-| `noise_schedule` | string | karras/native | 噪声调度 |
-| `cfg_rescale` | float | 0–1 | 提示词引导重缩放（V4 专用） |
-| `params_version` | int | 3 | V4 模型固定值 |
-| `qualityToggle` | bool | true/false | 是否追加官方质量词 |
-| `ucPreset` | int | 0–3 | 负面词预设等级（0 = 轻度） |
-| `negative_prompt` | string | - | 负面提示词 |
+| `scale` | float | 1.0–10.0 | CFG 引导比例（Prompt Guidance）。越高越贴合提示词，但过高会过饱和；官网默认 **6.5**，插件默认 **5.0** |
+| `steps` | int | 1–50 | 采样步数，步数越多细节越丰富，但耗时增加；推荐 **28** |
+| `sampler` | string | 见下表 | 采样器，决定生图的随机性和风格倾向；官网推荐 **k_euler_ancestral** |
+| `noise_schedule` | string | 见下表 | 噪声调度，配合采样器使用；V4 推荐 **karras**，V3 固定 **native** |
+| `seed` | int | 0–999999999 | 随机种子，相同种子+相同参数可复现图像（但换采样器/模型仍会变动） |
+| `n_samples` | int | 1–8 | 批量生成数量（插件固定 1） |
+| `cfg_rescale` | float | 0.0–1.0 | 提示词引导重新缩放（V4 专用）。调高可修正过高 scale 导致的过饱和问题；官网默认 **0.0**，可配置（`prompt_guidance_rescale`） |
+| `skip_cfg_above_sigma` | float \| null | `19.0` 或 `null` | **Variety+**：`null` = 关闭（插件默认），`19.0` = 开启（官网默认）。开启后细节多样性提升，但提示词贴合度略降 |
+| `qualityToggle` | bool | true/false | 服务端自动追加官方质量词（插件固定 `true`） |
+| `ucPreset` | int | 0–3 | 负面词预设等级（插件固定 `0` = 轻度） |
+| `params_version` | int | 3 | V4 模型固定传 `3` |
+| `prefer_brownian` | bool | true/false | V4 中使用布朗运动调度，推荐 `true` |
+| `sm` / `sm_dyn` / `autoSmea` | bool | false | V4 中已失效（inop），固定 `false` |
+
+---
 
 ### 采样器（sampler）
 
-| 值 | 说明 |
-|----|------|
-| `k_euler` | 快速稳定，推荐 |
-| `k_euler_ancestral` | 多样性更强 |
-| `k_dpmpp_2s_ancestral` | 质量高，较慢 |
-| `k_dpmpp_2m` | 质量高，快速 |
-| `k_dpmpp_sde` | 细节丰富 |
+| API 值 | 官网显示名 | 说明 | 推荐场景 |
+|--------|-----------|------|---------|
+| `k_euler_ancestral` | **Euler Ancestral**（官网推荐） | 每步引入随机噪声，多样性最强，画面活泼 | 人物、创意图，官网默认 |
+| `k_euler` | Euler | 确定性采样，风格稳定，同 seed 完全可复现 | 追求一致性/批量对比 |
+| `k_dpmpp_2s_ancestral` | DPM++ 2S Ancestral | 质量高、细节丰富，带随机性，耗时较长 | 高质量精出图 |
+| `k_dpmpp_2m` | DPM++ 2M | 高质量确定性采样 | 质量+稳定性均衡 |
+| `k_dpmpp_2m_sde` | DPM++ 2M SDE | 带 SDE 扩散的 2M，细节更多 | 高细节出图 |
+| `k_dpmpp_sde` | DPM++ SDE | 细节最丰富，耗时最长 | 细节控 |
+
+> **插件默认**：`k_euler_ancestral`（与官网一致）
+
+---
+
+### 噪声调度（noise_schedule）
+
+| API 值 | 官网显示名 | 说明 |
+|--------|-----------|------|
+| `karras` | **karras**（官网推荐） | 非线性降噪，整体质量好，V4 首选 |
+| `exponential` | exponential | 指数降噪，风格偏向柔和 |
+| `polyexponential` | polyexponential | 多项式指数，细节更平滑 |
+| `native` | — | V3 模型默认/唯一选项，V4 不推荐 |
+
+> **插件行为**：V4 模型使用 config 中的 `noise_schedule`（默认 `karras`）；V3 模型强制使用 `native` 忽略配置。
+
+---
+
+### Variety+（skip_cfg_above_sigma）
+
+| 状态 | API 值 | 效果 |
+|------|--------|------|
+| 关闭 | `null` | 全程引导，提示词贴合度高，同提示词出图差异小 |
+| 开启 | `19.0` | 主体成形前跳过引导，增加细节多样性，同提示词出图差异大 |
+
+> **插件配置**：`generation.variety_plus = true/false`（默认 `false`）  
+> 官网默认开启。三张图差异过大时，可尝试关闭 Variety+ 并固定 seed。
+
+---
+
+### scale 与 cfg_rescale 联动说明
+
+| scale 范围 | 建议 cfg_rescale | 效果描述 |
+|-----------|----------------|---------|
+| 5.0–6.5 | 0.0–0.3 | 官方推荐区间，画面自然 |
+| 6.5–8.0 | 0.3–0.7 | 高引导，颜色更饱和，cfg_rescale 避免过饱和 |
+| 8.0 以上 | 0.5–1.0 | 极高引导，非常贴合提示词，但容易过饱和失真 |
+
+> 插件命令支持实时覆盖：`/画图 1girl --scale 6.5 --rescale 0.3`
+
+---
 
 ### 插件 config 与 API 参数对应关系
 
 | config 字段 | API 参数 | 备注 |
 |-------------|----------|------|
-| `generation.scale` | `parameters.scale` | 直接映射 |
+| `generation.scale` | `parameters.scale` | 直接映射，命令可用 `--scale` 覆盖 |
 | `generation.steps` | `parameters.steps` | 直接映射 |
-| `generation.sampler` | `parameters.sampler` | 直接映射 |
+| `generation.sampler` | `parameters.sampler` | 直接映射，默认 `k_euler_ancestral` |
 | `generation.noise_schedule` | `parameters.noise_schedule` | V3 强制 `native` |
-| `generation.prompt_guidance_rescale` | `parameters.cfg_rescale` | V4 专用 |
-| `generation.negative_prompt` | `v4_negative_prompt.caption.base_caption` | 与 AI 提供的额外负面词合并后注入 |
-| `generation.resolution` | `parameters.width/height` | LLM 未指定或无效时的兜底 |
+| `generation.prompt_guidance_rescale` | `parameters.cfg_rescale` | V4 专用，命令可用 `--rescale` 覆盖 |
+| `generation.variety_plus` | `parameters.skip_cfg_above_sigma` | `true` → `19.0`，`false` → `null` |
+| `generation.negative_prompt` | `v4_negative_prompt.caption.base_caption` | 与 AI 额外负面词合并后注入 |
+| `generation.resolution` | `parameters.width/height` | 命令未指定画幅时的兜底 |
 | `vibe.presets[].ie` | `reference_information_extracted_multiple[]` | 编码时和注入时都使用 |
 | `vibe.presets[].strength` | `reference_strength_multiple[]` | 注入时使用 |
