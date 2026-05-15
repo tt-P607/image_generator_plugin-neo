@@ -7,6 +7,7 @@
 设计意图：
 - Action 的 description 包含完整的提示词编写指南和预设
 - 用户可配置的预设、角色标签、Vibe 列表等都在此处注入
+- 支持单图和批量多图生成（通过 batch_prompts 参数）
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ class DrawAction(BaseImageAction):
 
     action_name: str = "draw_image"
     action_description: str = (
-        "执行图片生成：将画面描述转换为 NovelAI 标签式提示词并生图。\n\n"
+        "执行图片生成：将画面描述转换为 NovelAI 标签式提示词并生图。\n"
+        "支持单图和批量多图生成。批量时使用 batch_prompts 参数传入 JSON 数组，按顺序逐张生成。\n\n"
         "=== NovelAI 提示词语法指南 ===\n\n"
         "**1. 基础结构**\n"
         "提示词必须为英文、半角逗号分隔的标签式结构。越靠前权重越高。\n"
@@ -61,6 +63,17 @@ class DrawAction(BaseImageAction):
         "  规则：source/target 必须成对出现在不同角色上；"
         "不要在 content_description 重复互动动作；"
         "同一对不能同时用 source# 和 mutual#\n\n"
+        "**7. 批量生成多张图**\n"
+        "使用 batch_prompts 参数传入 JSON 数组，每项为一张图的配置对象：\n"
+        "  - prompt：该图的英文标签提示词（必填）\n"
+        "  - resolution：画幅，可选覆盖（如 '1216x832'）\n"
+        "  - negative_prompt：该图专属负面词，可选覆盖\n"
+        "  - selected_vibes：该图的 Vibe 选择，可选覆盖\n"
+        "  - characters：该图的多人物 JSON 数组，可选覆盖\n"
+        "未指定的字段使用外层参数作为默认值。\n"
+        "示例：[{\"prompt\":\"1girl, sunset, beach\"},{\"prompt\":\"1girl, night, city\","
+        "\"resolution\":\"1216x832\"}]\n"
+        "注意：使用 batch_prompts 时，content_description 将被忽略。\n\n"
         "**注意事项**\n"
         "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
         "  - 单人物不要传 characters，留空即可\n"
@@ -77,34 +90,82 @@ class DrawAction(BaseImageAction):
             str,
             "图片内容的英文 NovelAI 标签，禁止中文。"
             "权重语法：n::tag::（提升）/ n::tag::（降低）。"
-            "角色格式：character_name (source)；皮肤/来源精确拼写。",
-        ],
+            "角色格式：character_name (source)；皮肤/来源精确拼写。"
+            "批量生成时此参数被忽略，使用 batch_prompts 代替。",
+        ] = "",
         resolution: Annotated[
             str,
             "图片画幅尺寸。横图用 '1216x832'，竖图用 '832x1216'，方图用 '1024x1024'。"
-            "根据内容主体形态选择。",
+            "根据内容主体形态选择。批量模式下作为默认画幅。",
         ] = "832x1216",
         negative_prompt: Annotated[
             str,
-            "场景专属额外排除词，英文逗号分隔。此处只填本次图片特有的排除内容。",
+            "场景专属额外排除词，英文逗号分隔。此处只填本次图片特有的排除内容。"
+            "批量模式下作为默认负面提示词。",
         ] = "",
         selected_vibes: Annotated[
             str,
             "从可用画风列表中选择要应用的 Vibe 名称，多个用英文逗号分隔。"
-            "不需要风格或无可选列表时留空。",
+            "不需要风格或无可选列表时留空。批量模式下作为默认 Vibe。",
         ] = "",
         characters: Annotated[
             str,
             "多人物 JSON 数组字符串（仅 V4 系列模型）。最多 6 个角色，每项 "
             "{prompt, uc?, x?, y?}；x/y 为 0~1 浮点坐标。互动用 source#/target#/mutual# 语法。"
-            "单人物时留空。",
+            "单人物时留空。批量模式下作为默认多人物配置。",
+        ] = "",
+        batch_prompts: Annotated[
+            str,
+            "批量生成多张图的 JSON 数组字符串。每项为对象，prompt 必填，"
+            "resolution/negative_prompt/selected_vibes/characters 可选覆盖外层默认值。"
+            "示例：[{\"prompt\":\"1girl, sunset\"},{\"prompt\":\"1girl, night\",\"resolution\":\"1216x832\"}]"
+            "单图时留空，使用 content_description 即可。",
         ] = "",
     ) -> tuple[bool, str]:
-        """执行画图动作。"""
+        """执行画图动作，支持单图和批量多图生成。"""
+        # 批量模式：解析 batch_prompts 并逐张生成
+        if batch_prompts.strip():
+            return await self._execute_batch(
+                batch_prompts=batch_prompts,
+                default_resolution=resolution,
+                default_negative_prompt=negative_prompt,
+                default_selected_vibes=selected_vibes,
+                default_characters=characters,
+            )
+
+        # 单图模式（向后兼容）
         if not content_description:
             logger.warning("画图动作未提供内容描述")
             return False, "画什么呢？请告诉我你想要的图片内容~"
 
+        return await self._execute_single(
+            content_description=content_description,
+            resolution=resolution,
+            negative_prompt=negative_prompt,
+            selected_vibes=selected_vibes,
+            characters=characters,
+        )
+
+    async def _execute_single(
+        self,
+        content_description: str,
+        resolution: str,
+        negative_prompt: str,
+        selected_vibes: str,
+        characters: str,
+    ) -> tuple[bool, str]:
+        """执行单张图片生成。
+
+        Args:
+            content_description: 图片内容标签
+            resolution: 画幅尺寸
+            negative_prompt: 负面提示词
+            selected_vibes: Vibe 名称（逗号分隔）
+            characters: 多人物 JSON 字符串
+
+        Returns:
+            (是否成功, 消息)
+        """
         width, height = self._parse_resolution(resolution, default="832x1216")
 
         prompt = self._build_prompt(content_description)
@@ -141,6 +202,86 @@ class DrawAction(BaseImageAction):
             selected_vibe_names=vibe_names,
             character_prompts=character_prompts,
         )
+
+    async def _execute_batch(
+        self,
+        batch_prompts: str,
+        default_resolution: str,
+        default_negative_prompt: str,
+        default_selected_vibes: str,
+        default_characters: str,
+    ) -> tuple[bool, str]:
+        """批量生成多张图片，按顺序逐张生成并发送。
+
+        Args:
+            batch_prompts: JSON 数组字符串，每项包含 prompt 及可选覆盖参数
+            default_resolution: 默认画幅
+            default_negative_prompt: 默认负面提示词
+            default_selected_vibes: 默认 Vibe
+            default_characters: 默认多人物配置
+
+        Returns:
+            (是否全部成功, 汇总消息)
+        """
+        # 解析 JSON 数组
+        try:
+            items = json.loads(batch_prompts)
+        except json.JSONDecodeError as e:
+            return False, f"batch_prompts 不是合法 JSON：{e!s}"
+
+        if not isinstance(items, list):
+            return False, "batch_prompts 必须是 JSON 数组"
+        if not items:
+            return False, "batch_prompts 数组不能为空"
+        if len(items) > 10:
+            return False, "batch_prompts 最多支持 10 张图"
+
+        # 验证每项格式
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                return False, f"batch_prompts[{idx}] 必须是对象"
+            if not str(item.get("prompt", "")).strip():
+                return False, f"batch_prompts[{idx}].prompt 不能为空"
+
+        logger.info(f"批量画图模式：共 {len(items)} 张图")
+
+        success_count = 0
+        fail_count = 0
+        results: list[str] = []
+
+        for idx, item in enumerate(items):
+            item_prompt = str(item["prompt"]).strip()
+            item_resolution = str(item.get("resolution", "")).strip() or default_resolution
+            item_negative = str(item.get("negative_prompt", "")).strip() or default_negative_prompt
+            item_vibes = str(item.get("selected_vibes", "")).strip() or default_selected_vibes
+            item_characters = str(item.get("characters", "")).strip() or default_characters
+
+            logger.info(f"批量画图 [{idx + 1}/{len(items)}]: {item_prompt[:50]}...")
+
+            success, msg = await self._execute_single(
+                content_description=item_prompt,
+                resolution=item_resolution,
+                negative_prompt=item_negative,
+                selected_vibes=item_vibes,
+                characters=item_characters,
+            )
+
+            if success:
+                success_count += 1
+                results.append(f"第{idx + 1}张：成功")
+            else:
+                fail_count += 1
+                results.append(f"第{idx + 1}张：失败 - {msg}")
+                logger.warning(f"批量画图 [{idx + 1}/{len(items)}] 失败: {msg}")
+
+        # 汇总结果
+        summary = f"[内部：批量画图完成，成功 {success_count}/{len(items)} 张]"
+        if fail_count > 0:
+            summary += "\n失败详情：\n" + "\n".join(
+                r for r in results if "失败" in r
+            )
+
+        return success_count > 0, summary
 
     def _parse_characters(
         self, raw: str
