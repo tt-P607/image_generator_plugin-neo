@@ -1,6 +1,6 @@
 {
     "name": "image_generator_plugin-neo",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "description": "基于 NovelAI 官方 API 的 AI 图片生成插件，支持文生图、图生图、Vibe 参考图等功能",
     "author": "言柒",
     "categories": ["tool"],
