@@ -197,15 +197,15 @@ class ImageGeneratorConfig(BaseConfig):
         """高级配置。"""
 
         temp_dir: str = Field(
-            default="data/image_generator_plugin/temp_images",
+            default="data/image_generator_plugin-neo/temp_images",
             description="临时图片保存目录（相对于项目根目录）",
         )
         vibe_storage_dir: str = Field(
-            default="data/image_generator_plugin/vibes",
+            default="data/image_generator_plugin-neo/vibes",
             description="Vibe 素材存储目录（相对于项目根目录）",
         )
         command_images_dir: str = Field(
-            default="data/image_generator_plugin/command_images",
+            default="data/image_generator_plugin-neo/command_images",
             description="命令生成图片保存目录（相对于项目根目录）",
         )
         max_vibes: int = Field(
@@ -297,11 +297,11 @@ class ImageGeneratorConfig(BaseConfig):
             description="选择服装所用模型名称（对应 model.toml 里的 name）；留空使用 ACTOR 任务默认模型",
         )
         wardrobe_file: str = Field(
-            default="data/image_generator_plugin/wardrobe.json",
+            default="data/image_generator_plugin-neo/wardrobe.json",
             description="衣柜定义文件路径（用户手动维护，定义所有可选套装）",
         )
         state_file: str = Field(
-            default="data/image_generator_plugin/wardrobe_state.json",
+            default="data/image_generator_plugin-neo/wardrobe_state.json",
             description="每日穿搭状态文件路径（系统自动更新，记录今天选择了哪套）",
         )
         daytime_start: int = Field(

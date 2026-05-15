@@ -123,9 +123,9 @@ class ImageGeneratorService(BaseService):
         self.max_characters = cfg.advanced.max_characters
 
         # 目录
-        self.temp_dir = Path(cfg.advanced.temp_dir)
-        self.vibe_storage_dir = Path(cfg.advanced.vibe_storage_dir)
-        self.command_images_dir = Path(cfg.advanced.command_images_dir)
+        self.temp_dir = Path(cfg.advanced.temp_dir).absolute()
+        self.vibe_storage_dir = Path(cfg.advanced.vibe_storage_dir).absolute()
+        self.command_images_dir = Path(cfg.advanced.command_images_dir).absolute()
 
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.vibe_storage_dir.mkdir(parents=True, exist_ok=True)

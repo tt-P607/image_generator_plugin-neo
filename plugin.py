@@ -30,7 +30,7 @@ class ImageGeneratorPlugin(BasePlugin):
     支持文生图、图生图、Vibe 参考图等功能。
     """
 
-    plugin_name: str = "image_generator_plugin"
+    plugin_name: str = "image_generator_plugin-neo"
     plugin_description: str = "基于 NovelAI 官方 API 的 AI 图片生成插件"
     plugin_version: str = "2.1.0"
 

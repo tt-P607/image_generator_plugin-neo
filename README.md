@@ -14,7 +14,7 @@
 
 ## 配置说明
 
-配置文件位于 `config/plugins/image_generator_plugin/config.toml`。
+配置文件位于 `config/plugins/image_generator_plugin-neo/config.toml`。
 
 ### 基础配置
 - `plugin.enabled`: 是否启用插件
@@ -27,7 +27,7 @@
 - `generation.character_prompt`: 角色外观描述（自由文本），画自己时参考
 
 ### 数据目录
-生成的图片和 Vibe 素材存放在 `data/image_generator_plugin/` 下：
+生成的图片和 Vibe 素材存放在 `data/image_generator_plugin-neo/` 下：
 - `vibes/` — Vibe 素材文件
 - `temp_images/` — AI 对话生成的临时图片
 - `command_images/` — 命令生成的图片
@@ -158,7 +158,7 @@ A：确认有 OPERATOR 或以上权限。
 A：插件内置冷却队列，任务会自动排队重试。
 
 **Q：Vibe 文件放哪里？**
-A：放在 `data/image_generator_plugin/vibes/`。支持 `.naiv4vibe`、`.naiv4vibebundle`、`.png`、`.jpg`。
+A：放在 `data/image_generator_plugin-neo/vibes/`。支持 `.naiv4vibe`、`.naiv4vibebundle`、`.png`、`.jpg`。
 
 **Q：提示词用中文还是英文？**
 A：NovelAI 只支持使用英文 tag。
