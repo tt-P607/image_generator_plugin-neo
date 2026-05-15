@@ -320,6 +320,13 @@ class ImageGeneratorConfig(BaseConfig):
             default=False,
             description="是否启用节假日感知（开启后会检测中国法定节假日，影响当天的穿搭选择）",
         )
+        history_days: int = Field(
+            default=3,
+            description=(
+                "生成穿搭时参考的历史天数。系统会将最近 N 天的穿搭记录传给 LLM，"
+                "要求避免重复搭配，增加每日穿搭多样性。设为 0 则不参考历史。"
+            ),
+        )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     components: ComponentsSection = Field(default_factory=ComponentsSection)

@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 SEGMENT_DAYTIME = "daytime"
 SEGMENT_EVENING = "evening"
@@ -219,10 +219,42 @@ class OutfitManager:
             return None
 
     def save_state(self, state: DailyState) -> None:
-        """保存今日状态。"""
+        """保存今日状态，同时保留历史记录。
+
+        状态文件格式扩展为包含 history 列表，保存最近的每日穿搭记录。
+        """
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # 读取现有文件以保留历史
+        existing: dict = {}
+        if self.state_file.exists():
+            try:
+                existing = json.loads(self.state_file.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+
+        # 将旧的当天记录归档到 history（如果日期不同）
+        history: list[dict] = existing.get("history", [])
+        old_date = existing.get("date", "")
+        if old_date and old_date != state.get("date"):
+            # 把旧记录存入历史
+            old_entry = {
+                "date": old_date,
+                "daytime": existing.get("daytime", {}),
+                "evening": existing.get("evening", {}),
+                "night": existing.get("night", {}),
+                "context": existing.get("context", {}),
+            }
+            history.append(old_entry)
+
+        # 保留最近 30 天历史（硬上限，防止文件无限增长）
+        history = history[-30:]
+
+        # 写入新状态 + 历史
+        output = dict(state)
+        output["history"] = history
         self.state_file.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2),
+            json.dumps(output, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -244,13 +276,13 @@ class OutfitManager:
             return False
         state = self.load_state()
         if state is None:
-            state = {
+            state = cast(DailyState, {
                 "date": datetime.now().date().isoformat(),
                 "daytime": {},
                 "evening": {},
                 "night": {},
                 "context": {"manual": True},
-            }
+            })
         state[segment][slot_name] = item_id  # type: ignore[literal-required]
         self.save_state(state)
         return True
@@ -265,13 +297,13 @@ class OutfitManager:
         preset_slots = presets[preset_id].get("slots", {})
         state = self.load_state()
         if state is None:
-            state = {
+            state = cast(DailyState, {
                 "date": datetime.now().date().isoformat(),
                 "daytime": {},
                 "evening": {},
                 "night": {},
                 "context": {"manual": True},
-            }
+            })
         state[segment] = dict(preset_slots)  # type: ignore[literal-required]
         self.save_state(state)
         return True
@@ -345,3 +377,24 @@ class OutfitManager:
                 lines.append(f"    [{slot_name}] {item_name}：{tags[:60]}")
 
         return "\n".join(lines)
+
+    def get_recent_history(self, days: int = 3) -> list[dict]:
+        """获取最近 N 天的穿搭历史记录。
+
+        Args:
+            days: 要获取的历史天数
+
+        Returns:
+            历史记录列表，每项包含 date/daytime/evening/night 字段，
+            按日期从旧到新排列。空列表表示无历史。
+        """
+        if days <= 0:
+            return []
+        if not self.state_file.exists():
+            return []
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        history: list[dict] = data.get("history", [])
+        return history[-days:]

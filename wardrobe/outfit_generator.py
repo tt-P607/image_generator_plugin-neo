@@ -18,10 +18,7 @@ from src.kernel.scheduler import TriggerType, get_unified_scheduler
 
 from .outfit_manager import (
     OutfitManager,
-    SEGMENT_DAYTIME,
     SEGMENT_DISPLAY_NAMES,
-    SEGMENT_EVENING,
-    SEGMENT_NIGHT,
     DailyState,
     WardrobeData,
 )
@@ -62,7 +59,7 @@ def get_day_type(d: datetime | None = None) -> str:
         return "weekend"
     try:
         import holidays  # type: ignore[import-untyped]
-        cn_holidays = holidays.China(years=target.year)
+        cn_holidays = holidays.China(years=target.year)  # type: ignore[attr-defined]
         if target in cn_holidays:
             return cn_holidays[target]
     except ImportError:
@@ -183,6 +180,21 @@ async def generate_daily_outfit(
     ]
     if personality_text:
         user_message_parts += ["", "角色信息：", personality_text]
+
+    # 加入近几天的穿搭历史，避免重复
+    history_days = getattr(config.wardrobe, "history_days", 3)
+    if history_days > 0:
+        recent_history = manager.get_recent_history(days=history_days)
+        if recent_history:
+            user_message_parts += ["", "【最近穿搭历史（请避免重复相同搭配）】"]
+            for entry in recent_history:
+                entry_date = entry.get("date", "?")
+                for seg_key, seg_label in [("daytime", "白天"), ("evening", "傍晚"), ("night", "深夜")]:
+                    seg_data = entry.get(seg_key, {})
+                    if seg_data:
+                        items_str = ", ".join(f"{k}={v}" for k, v in seg_data.items())
+                        user_message_parts.append(f"  {entry_date} {seg_label}：{items_str}")
+
     user_message_parts += [
         "",
         "衣柜内容（槽位 → 单品列表）：",
@@ -190,6 +202,7 @@ async def generate_daily_outfit(
         "",
         "请为白天（daytime）、傍晚（evening）、深夜（night）三个时段各选一套穿搭，",
         "每个时段从各槽位中选择适合的单品 id（不需要的槽位可省略）。",
+        "尽量与最近几天的搭配不同，展现穿搭多样性。",
     ]
     user_message = "\n".join(user_message_parts)
 
