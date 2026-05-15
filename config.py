@@ -160,7 +160,6 @@ class ImageGeneratorConfig(BaseConfig):
             description=(
                 "画风标签，自动拼接到所有提示词最前面。"
                 "用于统一画面风格基调，可根据模型特性调整。"
-                "例如：'1.2::honkai impact 3rd (game cg)::, smooth shading, luminous skin'"
             ),
         )
         negative_prompt: str = Field(
