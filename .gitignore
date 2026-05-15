@@ -12,3 +12,7 @@ vibes/*.naiv4vibe
 vibes/*.naiv4vibebundle
 vibes/*.png
 vibes/*.jpg
+
+# 打包构建文件
+dist/
+*.mfp

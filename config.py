@@ -197,16 +197,16 @@ class ImageGeneratorConfig(BaseConfig):
         """高级配置。"""
 
         temp_dir: str = Field(
-            default="temp_images",
-            description="临时图片保存目录（相对于插件目录）",
+            default="data/image_generator_plugin/temp_images",
+            description="临时图片保存目录（相对于项目根目录）",
         )
         vibe_storage_dir: str = Field(
-            default="vibes",
-            description="Vibe 素材存储目录（相对于插件目录）",
+            default="data/image_generator_plugin/vibes",
+            description="Vibe 素材存储目录（相对于项目根目录）",
         )
         command_images_dir: str = Field(
-            default="command_images",
-            description="命令生成图片保存目录（相对于插件目录）",
+            default="data/image_generator_plugin/command_images",
+            description="命令生成图片保存目录（相对于项目根目录）",
         )
         max_vibes: int = Field(
             default=4,
