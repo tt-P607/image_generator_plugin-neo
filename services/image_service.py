@@ -66,8 +66,10 @@ class ImageGeneratorService(BaseService):
         self.auto_vibe_select: bool = False
 
         # 配置将在 initialize() 中加载
+        self.channel: str = "official"  # "official" 或 "gateway"
         self.api_keys: list[str] = []
         self.base_url: str = ""
+        self.gateway_base_url: str = ""  # 规范化后的 gateway 根地址（从 base_url 推导）
         self.proxy: str = ""
         self.cooldown: int = 20
         self.model: str = ""
@@ -99,10 +101,17 @@ class ImageGeneratorService(BaseService):
         cfg: ImageGeneratorConfig = self.plugin.config  # type: ignore[assignment]
 
         # API 配置
+        self.channel = cfg.api.channel
         self.api_keys = list(cfg.api.api_keys)
         self.base_url = cfg.api.base_url
+        # 规范化 gateway 根地址：从 base_url 推导，去掉末尾的 /v1 和 /
+        _gw_url = cfg.api.base_url.rstrip("/")
+        if _gw_url.endswith("/v1"):
+            _gw_url = _gw_url[:-3]
+        self.gateway_base_url = _gw_url
         self.proxy = cfg.api.proxy
         self.cooldown = cfg.api.cooldown
+        logger.info(f"生图渠道: {self.channel}")
 
         # 生图参数
         self.model = cfg.generation.model
@@ -913,7 +922,7 @@ class ImageGeneratorService(BaseService):
         reference_images: Optional[list[dict]] = None,
         character_prompts: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[bool, str, Optional[str]]:
-        """内部生成图片方法（实际执行逻辑）。"""
+        """内部生成图片方法（实际执行逻辑）。根据 channel 配置分发到不同渠道。"""
         # 检查冷却
         is_ready, wait_time = self.check_cooldown()
         if not is_ready:
@@ -928,6 +937,25 @@ class ImageGeneratorService(BaseService):
         # 更新最后请求时间
         self.last_request_time = time.time()
 
+        # 根据渠道分发
+        if self.channel == "gateway":
+            try:
+                return await self._generate_via_gateway(
+                    prompt=prompt,
+                    api_key=api_key,
+                    negative_prompt=negative_prompt,
+                    width=width,
+                    height=height,
+                    scale=scale,
+                    cfg_rescale=cfg_rescale,
+                    character_prompts=character_prompts,
+                    from_command=from_command,
+                )
+            except Exception as e:
+                logger.error(f"Gateway 渠道生图失败: {e}")
+                return False, f"生成失败了：{e!s}", None
+
+        # 官方渠道（默认）
         # 构造 payload
         payload = self.construct_payload(
             prompt, user_id, is_img2img, img_base64, strength,
@@ -1298,6 +1326,249 @@ class ImageGeneratorService(BaseService):
         except Exception as e:
             logger.error(f"加载 Vibe 文件失败: {e}")
             return False, f"加载失败: {e}"
+
+    # ═════════════════════════════════════════════════════════════════════
+    #  Gateway 渠道（OpenAI Chat Completions 兼容接口）
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def _generate_via_gateway(
+        self,
+        prompt: str,
+        api_key: str,
+        negative_prompt: Optional[str] = None,
+        width: int = 1024,
+        height: int = 1024,
+        scale: Optional[float] = None,
+        cfg_rescale: Optional[float] = None,
+        character_prompts: Optional[list[dict[str, Any]]] = None,
+        from_command: bool = False,
+    ) -> tuple[bool, str, Optional[str]]:
+        """通过 novelai-gateway OpenAI 兼容接口生成图片。
+
+        使用 POST /v1/chat/completions 格式，支持：
+        - 正面提示词（user 消息）
+        - 负面提示词（system 消息，Negative prompt: 前缀）
+        - 多人物坐标（system 消息，Characters: 前缀）
+        - scale / cfg_rescale / width / height / sampler / noise_schedule
+
+        注意：Gateway 渠道不支持 Vibe Transfer 和 Director Reference，
+        这些功能仅在 official 渠道可用。
+
+        Args:
+            prompt: 正面提示词
+            api_key: NovelAI API Key（pst-*）
+            negative_prompt: 额外负面提示词（会与全局负面词合并）
+            width: 图片宽度（只接受 832 / 1024 / 1216）
+            height: 图片高度（只接受 832 / 1024 / 1216）
+            scale: 提示词引导强度（覆盖配置值）
+            cfg_rescale: CFG 缩放比例（覆盖配置值）
+            character_prompts: 多人物列表，每项 {"prompt", "uc", "x", "y"}
+            from_command: 是否来自命令调用
+
+        Returns:
+            (是否成功, 消息, 图片路径或 None)
+        """
+        url = f"{self.gateway_base_url}/v1/chat/completions"
+
+        # 合并负面提示词
+        merged_negative = self._merge_negative_prompts(negative_prompt)
+
+        # 构造 messages 数组
+        messages: list[dict[str, str]] = [
+            {"role": "user", "content": prompt},
+        ]
+        if merged_negative:
+            messages.append({
+                "role": "system",
+                "content": f"Negative prompt: {merged_negative}",
+            })
+        if character_prompts:
+            # 将多人物列表序列化为 Characters: JSON 格式
+            chars_payload = [
+                {
+                    "prompt": ch.get("prompt", ""),
+                    "uc": ch.get("uc", "") or "",
+                    "center": {
+                        "x": float(ch.get("x", 0.5)),
+                        "y": float(ch.get("y", 0.5)),
+                    },
+                }
+                for ch in character_prompts
+            ]
+            messages.append({
+                "role": "system",
+                "content": f"Characters: {json.dumps(chars_payload, ensure_ascii=False)}",
+            })
+
+        # 规范化画幅（gateway 只接受三种标准尺寸）
+        valid_sizes = {(832, 1216), (1024, 1024), (1216, 832)}
+        if (width, height) not in valid_sizes:
+            logger.warning(
+                f"Gateway 渠道不支持 {width}x{height}，回退到 832x1216"
+            )
+            width, height = 832, 1216
+
+        effective_scale = scale if scale is not None else self.scale
+        effective_cfg_rescale = cfg_rescale if cfg_rescale is not None else self.prompt_guidance_rescale
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "scale": effective_scale,
+            "cfg_rescale": effective_cfg_rescale,
+            "width": width,
+            "height": height,
+            "sampler": self.sampler,
+            "noise_schedule": self.noise_schedule,
+        }
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        logger.info(
+            f"[Gateway] POST {url} | model={self.model} | "
+            f"{width}x{height} | scale={effective_scale} | "
+            f"chars={len(character_prompts) if character_prompts else 0}"
+        )
+
+        connector = None
+        if self.proxy:
+            connector = aiohttp.TCPConnector()
+
+        max_net_retries = 2
+        net_retry_delay = 5
+
+        for net_attempt in range(max_net_retries + 1):
+            connector = None
+            if self.proxy:
+                connector = aiohttp.TCPConnector()
+
+            try:
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    request_kwargs: dict[str, Any] = {
+                        "json": payload,
+                        "headers": headers,
+                        "timeout": aiohttp.ClientTimeout(total=120),
+                    }
+                    if self.proxy:
+                        request_kwargs["proxy"] = self.proxy
+
+                    async with session.post(url, **request_kwargs) as resp:
+                        if resp.status == 429:
+                            if net_attempt < max_net_retries:
+                                logger.warning(
+                                    f"[Gateway] 遇到 429，{net_retry_delay}s 后重试 "
+                                    f"({net_attempt + 1}/{max_net_retries})"
+                                )
+                                await asyncio.sleep(net_retry_delay)
+                                continue
+                            self._rotate_api_key()
+                            return False, "请求太频繁了，等会儿再试吧", None
+
+                        if resp.status not in (200, 201):
+                            err = await resp.text()
+                            try:
+                                import orjson
+                                msg = orjson.loads(err).get("message", err)
+                            except Exception:
+                                msg = err
+                            return False, f"Gateway 请求失败 ({resp.status}): {msg}", None
+
+                        data = await resp.json()
+
+                        # 从 Chat Completions 响应中提取图片 URL
+                        try:
+                            content: str = (
+                                data["choices"][0]["message"]["content"]
+                            )
+                        except (KeyError, IndexError) as e:
+                            logger.error(f"[Gateway] 响应格式异常: {data}")
+                            return False, f"Gateway 响应格式异常: {e}", None
+
+                        # 响应格式：![image](https://...)
+                        import re
+                        match = re.search(r"!\[.*?\]\((https?://\S+)\)", content)
+                        if not match:
+                            logger.error(f"[Gateway] 无法从响应中提取图片 URL: {content!r}")
+                            return False, "Gateway 响应中未找到图片链接", None
+
+                        image_url = match.group(1)
+                        logger.info(f"[Gateway] 图片 URL: {image_url}")
+
+                        # 下载图片并保存到本地
+                        return await self._download_and_save_gateway_image(
+                            image_url, api_key, from_command=from_command
+                        )
+
+            except asyncio.TimeoutError:
+                if net_attempt < max_net_retries:
+                    logger.warning(
+                        f"[Gateway] 请求超时，{net_retry_delay}s 后重试 "
+                        f"({net_attempt + 1}/{max_net_retries})"
+                    )
+                    await asyncio.sleep(net_retry_delay)
+                    continue
+                return False, "Gateway 请求超时了，网络不太好", None
+            except Exception as e:
+                if net_attempt < max_net_retries:
+                    logger.warning(
+                        f"[Gateway] 网络错误，{net_retry_delay}s 后重试 "
+                        f"({net_attempt + 1}/{max_net_retries}): {e}"
+                    )
+                    await asyncio.sleep(net_retry_delay)
+                    continue
+                logger.error(f"[Gateway] 请求异常: {e}", exc_info=True)
+                return False, f"Gateway 网络出问题了：{e}", None
+
+        return False, "未知错误", None
+
+    async def _download_and_save_gateway_image(
+        self,
+        image_url: str,
+        api_key: str,
+        *,
+        from_command: bool = False,
+    ) -> tuple[bool, str, Optional[str]]:
+        """从 Gateway 返回的 URL 下载图片并保存到本地。
+
+        Args:
+            image_url: Gateway 返回的图片 URL
+            api_key: 用于认证的 API Key（部分 gateway 实现需要）
+            from_command: 是否来自命令调用
+
+        Returns:
+            (是否成功, 消息, 图片路径或 None)
+        """
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+        }
+        connector = None
+        if self.proxy:
+            connector = aiohttp.TCPConnector()
+
+        try:
+            async with aiohttp.ClientSession(connector=connector) as session:
+                request_kwargs: dict[str, Any] = {
+                    "headers": headers,
+                    "timeout": aiohttp.ClientTimeout(total=60),
+                }
+                if self.proxy:
+                    request_kwargs["proxy"] = self.proxy
+
+                async with session.get(image_url, **request_kwargs) as resp:
+                    if resp.status not in (200, 201):
+                        err = await resp.text()
+                        return False, f"下载图片失败 ({resp.status}): {err[:200]}", None
+                    img_data = await resp.read()
+
+            return await self._save_image_from_bytes(img_data, from_command=from_command)
+
+        except Exception as e:
+            logger.error(f"[Gateway] 下载图片失败: {e}", exc_info=True)
+            return False, f"下载图片失败：{e}", None
 
     async def get_user_info(self) -> tuple[bool, str]:
         """NovelAI 官方 API 不提供账号信息查询。"""

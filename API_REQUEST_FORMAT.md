@@ -2,6 +2,10 @@
 
 > 本文档基于 NovelAI 官方 API 逆向整理，结合第三方 SDK [caru-ini/novelai-sdk](https://github.com/caru-ini/novelai-sdk) 的实现，
 > 记录本插件使用的完整请求格式。适用模型：V4（nai-diffusion-4-*）、V3（nai-diffusion-3）。
+>
+> 本插件支持两种生图渠道，通过 `api.channel` 配置项切换：
+> - **official**（默认）：直连 NovelAI 官方 API，支持全部功能（Vibe Transfer、Director Reference、多人物等）。
+> - **gateway**：通过 novelai-gateway 中转分发渠道，使用 OpenAI Chat Completions 兼容接口，参数受限但部署更灵活。
 
 ---
 
@@ -17,6 +21,12 @@
    - [6.2 在生图请求中注入 Vibe](#62-在生图请求中注入-vibe)
 7. [响应处理](#7-响应处理)
 8. [参数速查表](#8-参数速查表)
+9. [Gateway 渠道（OpenAI 兼容接口）](#9-gateway-渠道openai-兼容接口)
+   - [9.1 渠道概述与限制](#91-渠道概述与限制)
+   - [9.2 Chat Completions 接口](#92-chat-completions-接口)
+   - [9.3 消息格式与多人物](#93-消息格式与多人物)
+   - [9.4 响应处理](#94-响应处理)
+   - [9.5 配置示例](#95-配置示例)
 
 ---
 
@@ -476,3 +486,161 @@ elif content[:4] == b"\x89PNG":   # PNG magic
 | `generation.resolution` | `parameters.width/height` | 命令未指定画幅时的兜底 |
 | `vibe.presets[].ie` | `reference_information_extracted_multiple[]` | 编码时和注入时都使用 |
 | `vibe.presets[].strength` | `reference_strength_multiple[]` | 注入时使用 |
+
+---
+
+## 9. Gateway 渠道（OpenAI 兼容接口）
+
+> 对应配置：`api.channel = "gateway"`，`api.base_url` 填写 gateway 服务地址
+
+### 9.1 渠道概述与限制
+
+novelai-gateway 是一个将 NovelAI 图像生成能力包装为 OpenAI Chat Completions 兼容接口的中转服务。
+插件在 `channel = "gateway"` 时使用此渠道，认证方式与官方渠道相同（`pst-*` Key）。
+
+**与官方渠道的差异：**
+
+| 功能 | official | gateway |
+|------|----------|---------|
+| Vibe Transfer | ✅ 支持 | ❌ 不支持 |
+| Director Reference | ✅ 支持 | ❌ 不支持 |
+| 图生图（img2img） | ✅ 支持 | ❌ 不支持 |
+| 多人物坐标 | ✅ 支持 | ✅ 支持（通过 system 消息） |
+| 负面提示词 | ✅ 支持 | ✅ 支持（通过 system 消息） |
+| scale / cfg_rescale | ✅ 支持 | ✅ 支持 |
+| 画幅 | 任意 64 倍数 | 仅 832×1216 / 1024×1024 / 1216×832 |
+| 步数 | 可配置 | 固定 28（网关锁定） |
+| 响应格式 | ZIP/PNG 二进制 | Markdown 图片链接 |
+
+### 9.2 Chat Completions 接口
+
+**端点**：`POST {gateway_base_url}/v1/chat/completions`
+
+**请求体**：
+
+```json
+{
+  "model": "nai-diffusion-4-5-curated",
+  "stream": false,
+  "scale": 5.0,
+  "cfg_rescale": 0.7,
+  "sampler": "k_euler_ancestral",
+  "noise_schedule": "karras",
+  "width": 832,
+  "height": 1216,
+  "messages": [
+    {
+      "role": "user",
+      "content": "1girl, blue hair, outdoor, best quality"
+    },
+    {
+      "role": "system",
+      "content": "Negative prompt: lowres, bad quality, blurry"
+    },
+    {
+      "role": "system",
+      "content": "Characters: [{\"prompt\": \"1girl, red hair\", \"uc\": \"bad hands\", \"center\": {\"x\": 0.3, \"y\": 0.5}}]"
+    }
+  ]
+}
+```
+
+**顶层参数说明**：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `model` | string | 是 | — | 模型名称，见支持的模型列表 |
+| `stream` | bool | 否 | `false` | 插件固定传 `false` |
+| `scale` | float | 否 | `5.0` | 提示词引导强度，范围 `1.0–10.0` |
+| `cfg_rescale` | float | 否 | `0.7` | CFG 缩放比例，范围 `0.0–1.0` |
+| `width` | int | 否 | `832` | 图片宽度，只允许 `832`、`1024`、`1216` |
+| `height` | int | 否 | `1216` | 图片高度，只允许 `832`、`1024`、`1216` |
+| `sampler` | string | 否 | `k_euler_ancestral` | 采样器 |
+| `noise_schedule` | string | 否 | `karras` | 噪声调度 |
+
+**支持的模型**：
+
+| 模型 ID | 说明 |
+|---------|------|
+| `nai-diffusion-4-5-curated` | V4.5 精选版（默认） |
+| `nai-diffusion-4-5-full` | V4.5 完整版 |
+| `nai-diffusion-4-curated-preview` | V4 精选预览版 |
+| `nai-diffusion-3` | V3 |
+| `nai-diffusion-furry-3` | V3 Furry |
+
+### 9.3 消息格式与多人物
+
+**正面提示词**（`role: "user"`）：
+
+```json
+{"role": "user", "content": "1girl, blue hair, outdoor, best quality"}
+```
+
+**负面提示词**（`role: "system"`，`Negative prompt:` 前缀）：
+
+```json
+{"role": "system", "content": "Negative prompt: lowres, bad quality, blurry"}
+```
+
+插件会将全局负面词（`generation.negative_prompt`）与 Action 传入的额外负面词合并后，
+通过此格式传给 Gateway。
+
+**多人物坐标**（`role: "system"`，`Characters:` 前缀）：
+
+```json
+{
+  "role": "system",
+  "content": "Characters: [{\"prompt\": \"1girl, red hair\", \"uc\": \"bad hands\", \"center\": {\"x\": 0.3, \"y\": 0.5}}, {\"prompt\": \"1girl, blue hair\", \"uc\": \"bad anatomy\", \"center\": {\"x\": 0.7, \"y\": 0.5}}]"
+}
+```
+
+- `center.x` / `center.y`：相对坐标（`0.0–1.0`），`{x: 0.5, y: 0.5}` 为画面正中央。
+- 插件从 `draw_image` Action 的 `characters` 参数解析后自动构造此消息。
+
+### 9.4 响应处理
+
+Gateway 返回标准 OpenAI Chat Completions 格式，`content` 字段为 Markdown 图片链接：
+
+```json
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "![image](https://your-gateway.example.com/images/abc123.png)"
+      }
+    }
+  ]
+}
+```
+
+插件通过正则提取 URL，然后下载图片并保存到本地（与官方渠道保存路径相同）。
+
+### 9.5 配置示例
+
+```toml
+[api]
+# 切换到 Gateway 渠道（只改这两项即可）
+channel = "gateway"
+
+# 填写 Gateway 服务颁发的 API Key
+api_keys = ["your-gateway-api-key"]
+
+# base_url 改为 gateway 服务地址，支持含 /v1 后缀，插件会自动规范化
+# 示例（本地部署）：http://127.0.0.1:31555
+# 示例（远程中转）：https://your-gateway.example.com/v1
+base_url = "https://your-gateway.example.com/v1"
+
+proxy = ""
+cooldown = 3
+
+[generation]
+model = "nai-diffusion-4-5-curated"
+scale = 5.0
+cfg_rescale = 0.7
+sampler = "k_euler_ancestral"
+noise_schedule = "karras"
+```
+
+> **注意**：切换到 `gateway` 渠道后，Vibe Transfer 和 Director Reference 功能将自动跳过，
+> 不会报错，但也不会生效。如需使用这些功能，请切回 `official` 渠道。

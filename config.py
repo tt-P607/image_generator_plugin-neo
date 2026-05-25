@@ -127,13 +127,37 @@ class ImageGeneratorConfig(BaseConfig):
     class ApiSection(SectionBase):
         """API 连接配置。"""
 
+        channel: str = Field(
+            default="official",
+            description=(
+                "生图渠道选择，决定插件使用哪套 API 协议。端点统一由 base_url 配置。\n\n"
+                "  official（默认）\n"
+                "    直连 NovelAI 官方 API 协议，base_url 填写生图端点完整路径。\n"
+                "    支持全部功能：Vibe Transfer、Director Reference、图生图、多人物坐标等。\n"
+                "    响应格式：ZIP/PNG 二进制，插件自动解压保存。\n"
+                "    示例 base_url：https://image.novelai.net/ai/generate-image\n\n"
+                "  gateway\n"
+                "    使用 OpenAI Chat Completions 兼容协议（novelai-gateway 中转服务）。\n"
+                "    base_url 填写 gateway 服务根地址，插件自动拼接 /v1/chat/completions。\n"
+                "    支持含 /v1 后缀的完整路径，插件会自动规范化。\n"
+                "    支持：正面/负面提示词、多人物坐标、scale/cfg_rescale/画幅/采样器等参数。\n"
+                "    不支持：Vibe Transfer、Director Reference、图生图（切换后自动跳过，不报错）。\n"
+                "    响应格式：Markdown 图片链接，插件自动下载保存。\n"
+                "    示例 base_url：http://127.0.0.1:31555 或 https://your-gateway.example.com/v1"
+            ),
+        )
         api_keys: list[str] = Field(
             default_factory=list,
-            description="NovelAI API Keys 列表（支持多个，会自动轮换）",
+            description="API Keys 列表（支持多个，会自动轮换）。key 格式由所用渠道决定。",
         )
         base_url: str = Field(
             default="https://image.novelai.net/ai/generate-image",
-            description="API 基础 URL",
+            description=(
+                "API 端点 URL，两种渠道均使用此字段。\n"
+                "official 渠道：填写完整的生图端点，如 https://image.novelai.net/ai/generate-image。\n"
+                "gateway 渠道：填写服务根地址（含或不含 /v1 均可），"
+                "如 http://127.0.0.1:31555 或 https://your-gateway.example.com/v1。"
+            ),
         )
         proxy: str = Field(
             default="",
