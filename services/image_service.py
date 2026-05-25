@@ -88,6 +88,7 @@ class ImageGeneratorService(BaseService):
         self.temp_dir: Path = Path()
         self.vibe_storage_dir: Path = Path()
         self.command_images_dir: Path = Path()
+        self.selectable_director_refs: dict[str, dict[str, Any]] = {}  # 精密参考池
 
     # ═════════════════════════════════════════════════════════════════════
     #  初始化 / 清理
@@ -144,12 +145,18 @@ class ImageGeneratorService(BaseService):
 
         # 加载并编码 always Vibe
         if cfg.vibe.always and self.api_keys:
-            await self._load_preset_vibes(cfg.vibe.always)
+            enabled_always = [v for v in cfg.vibe.always if getattr(v, "enabled", True)]
+            await self._load_preset_vibes(enabled_always)
 
-        # 加载并编码 selectable Vibe 池
+        # 加载并编码 selectable Vibe 池（不过滤 enabled，LLM 始终可选）
         if cfg.vibe.selectable and self.api_keys:
             await self._load_selectable_vibes(cfg.vibe.selectable)
 
+        # 加载精密参考池
+        if cfg.director_reference.selectable and self.api_keys:
+            await self._load_selectable_director_refs(cfg.director_reference.selectable)
+
+        logger.info(f"精密参考池加载完成，共 {len(self.selectable_director_refs)} 个")
         logger.info("图片生成服务初始化完成")
 
     async def cleanup(self) -> None:
@@ -209,6 +216,85 @@ class ImageGeneratorService(BaseService):
                 logger.error(f"加载可选 Vibe 失败 [{item.file}]: {e}")
         logger.info(f"可选 Vibe 池加载完成，共 {len(self.selectable_vibes)} 个")
 
+    async def _load_selectable_director_refs(self, selectable: list[Any]) -> None:
+        """在初始化时加载所有可选精密参考图。
+
+        NAI API 要求精密参考图必须是 1024x1536 的 PNG（保持宽高比，黑色填充）。
+        """
+        self.selectable_director_refs = {}
+        for item in selectable:
+            if not getattr(item, "enabled", True):
+                continue
+            file_path = self.vibe_storage_dir / item.file
+            if not file_path.exists():
+                logger.warning(f"精密参考文件不存在，跳过: {item.file}")
+                continue
+            try:
+                raw_b64 = self._read_image_b64_from_vibe_file(file_path)
+                if not raw_b64:
+                    continue
+                # NAI API 要求精密参考图为 1024x1536 PNG，需要先 crop_and_resize
+                processed_b64 = self._crop_and_resize_for_director_ref(raw_b64)
+                name = item.name or Path(item.file).stem
+                self.selectable_director_refs[name] = {
+                    "data": processed_b64,
+                    "type": item.type,
+                    "fidelity": item.fidelity,
+                    "strength": item.strength,
+                }
+                logger.info(f"已加载精密参考: {name} ({item.file})")
+            except Exception as e:
+                logger.error(f"加载精密参考失败 [{item.file}]: {e}")
+        logger.info(f"精密参考池加载完成，共 {len(self.selectable_director_refs)} 个")
+
+    def _crop_and_resize_for_director_ref(self, raw_b64: str) -> str:
+        """将图片缩放并填充到 1024x1536（NAI 精密参考图要求的格式）。
+
+        保持宽高比，不足部分用黑色填充，输出 PNG 格式。
+
+        Args:
+            raw_b64: 原始图片 base64 字符串
+
+        Returns:
+            处理后的 base64 字符串（1024x1536 PNG）
+        """
+        import io
+        try:
+            img_data = base64.b64decode(raw_b64)
+            img = Image.open(io.BytesIO(img_data)).convert("RGB")
+
+            target_w, target_h = 1024, 1536
+            src_w, src_h = img.size
+
+            src_ratio = src_w / src_h
+            target_ratio = target_w / target_h
+
+            if src_ratio > target_ratio:
+                new_w = target_w
+                new_h = int(target_w / src_ratio)
+            else:
+                new_h = target_h
+                new_w = int(target_h * src_ratio)
+
+            resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+            background = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+            offset_x = (target_w - new_w) // 2
+            offset_y = (target_h - new_h) // 2
+            background.paste(resized, (offset_x, offset_y))
+
+            buf = io.BytesIO()
+            background.save(buf, format="PNG")
+            result_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            logger.debug(
+                f"精密参考图已处理: {src_w}x{src_h} → {target_w}x{target_h} "
+                f"({len(raw_b64)//1024}KB → {len(result_b64)//1024}KB)"
+            )
+            return result_b64
+        except Exception as e:
+            logger.warning(f"精密参考图处理失败，使用原图: {e}")
+            return raw_b64
+
     async def _load_preset_vibes(self, presets: list[Any]) -> None:
         """在初始化时加载并编码所有预设 Vibe，结果缓存在 self.preset_vibes."""
         self.preset_vibes = []
@@ -248,30 +334,45 @@ class ImageGeneratorService(BaseService):
 
     async def _queue_worker(self) -> None:
         """队列处理器：串行处理所有生图任务。"""
-        while True:
-            task_func = None
-            result_future: asyncio.Future[Any] | None = None
-            try:
-                task_func, result_future = await ImageGeneratorService._task_queue.get()
-                result = await task_func()
-                if not result_future.done():
-                    result_future.set_result(result)
-                else:
-                    logger.warning("任务结果 future 已完成，跳过设置结果")
-            except Exception as e:
-                logger.error(f"队列处理器捕获异常: {e}", exc_info=True)
-                if result_future is not None and not result_future.done():
-                    try:
-                        result_future.set_exception(e)
-                    except Exception as set_ex:
-                        logger.error(f"设置异常失败: {set_ex}", exc_info=True)
-            finally:
-                if task_func is not None:
-                    try:
-                        ImageGeneratorService._task_queue.task_done()
-                    except Exception as done_ex:
-                        logger.error(f"标记任务完成失败: {done_ex}", exc_info=True)
-                await asyncio.sleep(0.01)
+        try:
+            while True:
+                task_func = None
+                result_future: asyncio.Future[Any] | None = None
+                try:
+                    task_func, result_future = await ImageGeneratorService._task_queue.get()
+                    result = await task_func()
+                    if not result_future.done():
+                        result_future.set_result(result)
+                    else:
+                        logger.warning("任务结果 future 已完成，跳过设置结果")
+                except asyncio.CancelledError:
+                    # 任务被取消时，通知等待中的 future 并重新抛出
+                    if result_future is not None and not result_future.done():
+                        result_future.cancel()
+                    if task_func is not None:
+                        try:
+                            ImageGeneratorService._task_queue.task_done()
+                        except Exception:
+                            pass
+                    raise
+                except Exception as e:
+                    logger.error(f"队列处理器捕获异常: {e}", exc_info=True)
+                    if result_future is not None and not result_future.done():
+                        try:
+                            result_future.set_exception(e)
+                        except Exception as set_ex:
+                            logger.error(f"设置异常失败: {set_ex}", exc_info=True)
+                finally:
+                    if task_func is not None:
+                        try:
+                            ImageGeneratorService._task_queue.task_done()
+                        except Exception as done_ex:
+                            logger.error(f"标记任务完成失败: {done_ex}", exc_info=True)
+                    await asyncio.sleep(0.01)
+        finally:
+            # worker 退出时重置标志，允许下次重新启动
+            ImageGeneratorService._queue_worker_started = False
+            logger.warning("生图队列处理器已退出，下次请求时将自动重启")
 
     async def _enqueue_task(self, task_func: Any) -> Any:
         """将任务加入队列并等待结果。
@@ -282,7 +383,7 @@ class ImageGeneratorService(BaseService):
         Returns:
             任务执行结果
         """
-        result_future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        result_future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         await ImageGeneratorService._task_queue.put((task_func, result_future))
         logger.info(f"任务已加入队列，当前队列长度: {ImageGeneratorService._task_queue.qsize()}")
         return await result_future
@@ -667,7 +768,8 @@ class ImageGeneratorService(BaseService):
                 logger.info(f"注入精密参考图：共 {len(reference_images)} 张")
 
             # Vibe 参考图注入（预设 + 用户手动添加）
-            if not is_img2img:
+            # 注意：精密参考（Director Reference）与 Vibe Transfer 互斥，有精密参考时跳过 Vibe
+            if not is_img2img and not reference_images:
                 vibes_to_inject: list[dict[str, Any]] = []
 
                 # 始终注入的 Vibe（always_inject 时）
@@ -837,17 +939,19 @@ class ImageGeneratorService(BaseService):
             character_prompts=character_prompts,
         )
 
-        # 调试日志（隐藏 base64 数据）
-        import copy as _copy
-        debug_payload = _copy.deepcopy(payload)
-        params = debug_payload.get("parameters", {})
-        if "image" in params:
-            params["image"] = f"<Base64 data, {len(params['image'])} chars>"
-        if "reference_image_multiple" in params:
-            params["reference_image_multiple"] = [
-                f"<Data_{i}, {len(d)} chars>"
-                for i, d in enumerate(params["reference_image_multiple"])
-            ]
+        # 调试日志（隐藏 base64 数据，避免 deepcopy 大数据阻塞事件循环）
+        params = payload.get("parameters", {})
+        debug_params: dict[str, Any] = {}
+        for k, v in params.items():
+            if k == "image" and isinstance(v, str):
+                debug_params[k] = f"<Base64 data, {len(v)} chars>"
+            elif k == "reference_image_multiple" and isinstance(v, list):
+                debug_params[k] = [f"<Data_{i}, {len(d)} chars>" for i, d in enumerate(v)]
+            elif k == "director_reference_images" and isinstance(v, list):
+                debug_params[k] = [f"<RefImg_{i}, {len(d)} chars>" for i, d in enumerate(v)]
+            else:
+                debug_params[k] = v
+        debug_payload = {k: (debug_params if k == "parameters" else v) for k, v in payload.items()}
         logger.info(f"请求 payload: {json.dumps(debug_payload, ensure_ascii=False, indent=2)}")
 
         # 提交请求并获取结果
@@ -999,7 +1103,9 @@ class ImageGeneratorService(BaseService):
 
         try:
             with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-                for filename in zf.namelist():
+                all_files = zf.namelist()
+                logger.info(f"ZIP 内容: {[(f, zf.getinfo(f).file_size) for f in all_files]}")
+                for filename in all_files:
                     if filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                         img_data = zf.read(filename)
                         return await self._save_image_from_bytes(

@@ -381,39 +381,57 @@ class ImageGeneratorCommand(BaseCommand):
 
             # 简化 user_id：命令场景下无法直接获取
             user_id = "command_user"
+            stream_id = self.stream_id
+            message_id = self.message_id
 
-            success, message, image_path = await service.generate_image(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                user_id=user_id,
-                width=width,
-                height=height,
-                is_img2img=False,
-                from_command=True,
-                scale=scale,
-                cfg_rescale=cfg_rescale,
-            )
+            # 后台执行生图，命令立即返回
+            from src.kernel.concurrency import get_task_manager
 
-            if success and image_path:
-                ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
-                if ok and img_b64:
-                    await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
-                    await send_text(
-                        pick(DRAW_SUCCESS_HINTS, "draw_success"),
-                        stream_id=self.stream_id,
+            async def _background_generate() -> None:
+                try:
+                    success, message, image_path = await service.generate_image(
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        user_id=user_id,
+                        width=width,
+                        height=height,
+                        is_img2img=False,
+                        from_command=True,
+                        scale=scale,
+                        cfg_rescale=cfg_rescale,
                     )
-                    ImageUtils.cleanup_temp_file(image_path, keep_file=True)
-                    return True, "图片生成成功"
-                await send_text(
-                    pick(ERROR_HINTS, "error").format(error=humanize_error(msg)),
-                    stream_id=self.stream_id,
-                )
-                return False, msg
-            await send_text(
-                pick(GENERATE_ERROR_HINTS, "gen_error").format(error=humanize_error(message)),
-                stream_id=self.stream_id,
+
+                    if success and image_path:
+                        ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
+                        if ok and img_b64:
+                            await send_image(img_b64, stream_id=stream_id, reply_to=message_id or None)
+                            await send_text(
+                                pick(DRAW_SUCCESS_HINTS, "draw_success"),
+                                stream_id=stream_id,
+                            )
+                            ImageUtils.cleanup_temp_file(image_path, keep_file=True)
+                            return
+                        await send_text(
+                            pick(ERROR_HINTS, "error").format(error=humanize_error(msg)),
+                            stream_id=stream_id,
+                        )
+                        return
+                    await send_text(
+                        pick(GENERATE_ERROR_HINTS, "gen_error").format(error=humanize_error(message)),
+                        stream_id=stream_id,
+                    )
+                except Exception as e:
+                    logger.error(f"后台生图任务异常: {e}", exc_info=True)
+                    await send_text(
+                        pick(GENERATE_ERROR_HINTS, "gen_error").format(error=humanize_error(str(e))),
+                        stream_id=stream_id,
+                    )
+
+            get_task_manager().create_task(
+                _background_generate(),
+                name=f"cmd_draw_{user_id}",
             )
-            return False, message
+            return True, "图片生成任务已提交"
 
         except Exception as e:
             logger.error(f"执行 /nai_image draw 命令时出错: {e}", exc_info=True)

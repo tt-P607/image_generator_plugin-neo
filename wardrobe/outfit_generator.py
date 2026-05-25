@@ -164,9 +164,18 @@ async def generate_daily_outfit(
     day_type_display = {"workday": "工作日", "weekend": "周末"}.get(day_type, f"节假日（{day_type}）")
 
     system_prompt = (
-        "你是一位穿搭顾问。你需要根据今天的季节和日期，从给定的衣柜槽位中为角色选择每个时段（白天/傍晚/深夜）的穿搭。\n"
+        "你正在以角色本人的视角为自己挑选今天的穿搭。\n"
+        "从给定的衣柜槽位中，为每个时段（白天/傍晚/深夜）各选一套搭配。\n"
         "每个槽位从给定选项中选一个 id（也可以不选该槽位，省略即可）。\n"
-        "以 JSON 格式返回，结构为：\n"
+    )
+
+    # 注入用户自定义的选衣指引
+    selection_instructions = getattr(config.wardrobe, "selection_instructions", "")
+    if selection_instructions.strip():
+        system_prompt += f"\n【搭配规则】\n{selection_instructions.strip()}\n"
+
+    system_prompt += (
+        "\n以 JSON 格式返回，结构为：\n"
         '{"daytime": {"槽位名": "item_id", ...}, "evening": {...}, "night": {...}}\n'
         "不要包含任何说明文字，只返回 JSON。"
     )

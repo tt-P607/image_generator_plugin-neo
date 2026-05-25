@@ -35,18 +35,21 @@ class BaseImageAction(BaseAction):
     def to_schema(cls) -> dict[str, Any]:
         """生成 LLM Tool Schema，动态注入预设负面提示词说明。"""
         schema = super().to_schema()
+        props = (
+            schema.get("function", {})
+            .get("parameters", {})
+            .get("properties", {})
+        )
+
+        # 注入负面提示词说明
         if cls._preset_negative_prompt:
-            props = (
-                schema.get("function", {})
-                .get("parameters", {})
-                .get("properties", {})
-            )
             if "negative_prompt" in props:
                 props["negative_prompt"]["description"] = (
                     f"场景专属额外排除词，英文逗号分隔。"
                     f"系统已内置：{cls._preset_negative_prompt}。"
                     f"此处只填本次图片特有的排除内容。"
                 )
+
         return schema
 
 
@@ -71,6 +74,7 @@ class BaseImageAction(BaseAction):
         error_prefix: str = "生成失败",
         selected_vibe_names: Optional[list[str]] = None,
         character_prompts: Optional[list[dict[str, Any]]] = None,
+        reference_images: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[bool, str]:
         """生成图片并发送（统一封装方法）。
 
@@ -113,6 +117,7 @@ class BaseImageAction(BaseAction):
                     group_id=str(group_id) if group_id else None,
                     selected_vibe_names=selected_vibe_names,
                     character_prompts=character_prompts,
+                    reference_images=reference_images,
                 )
 
                 if success and image_path:

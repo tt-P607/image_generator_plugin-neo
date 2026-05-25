@@ -62,10 +62,13 @@ class DrawAction(BaseImageAction):
         "  规则：source/target 必须成对出现在不同角色上；"
         "不要在 content_description 重复互动动作；"
         "同一对不能同时用 source# 和 mutual#\n\n"
+        "**7. 精确参考 (Director Reference)**\n"
+        "使用 selected_director_refs 参数，填入要使用的参考图名称（逗号分隔）。\n"
+        "可用名称由系统在上下文中提供，不在列表中的名称无效。\n\n"
         "**注意事项**\n"
         "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
         "  - 单人物不要传 characters，留空即可\n"
-        "  - 仅 V4 系列模型支持多人物\n\n"
+        "  - 仅 V4 系列模型支持多人物和精确参考\n\n"
         "**画幅**：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024"
     )
 
@@ -93,6 +96,11 @@ class DrawAction(BaseImageAction):
             str,
             "从可用画风列表中选择要应用的 Vibe 名称，多个用英文逗号分隔。"
             "不需要风格或无可选列表时留空。",
+        ] = "",
+        selected_director_refs: Annotated[
+            str,
+            "从可用精密参考列表中选择要应用的参考图名称，多个用英文逗号分隔。"
+            "不需要参考或无可用列表时留空。",
         ] = "",
         characters: Annotated[
             str,
@@ -132,6 +140,22 @@ class DrawAction(BaseImageAction):
                 f"-> {[(c['prompt'][:30], c['x'], c['y']) for c in character_prompts]}"
             )
 
+        # 解析自选精密参考（从预设池按名称查找真实图片数据）
+        ref_images: list[dict[str, Any]] = []
+        if selected_director_refs.strip():
+            service = self.get_service()
+            if service and hasattr(service, "selectable_director_refs"):
+                names = [n.strip() for n in selected_director_refs.split(",") if n.strip()]
+                for name in names:
+                    ref = service.selectable_director_refs.get(name)
+                    if ref:
+                        ref_images.append(ref)
+                        logger.info(f"LLM 选择了精密参考: {name}")
+                    else:
+                        logger.warning(f"LLM 选择了不存在的精密参考: {name}")
+
+        final_refs = ref_images
+
         return await self.generate_and_send_image(
             prompt=prompt,
             negative_prompt=negative_prompt or None,
@@ -141,6 +165,7 @@ class DrawAction(BaseImageAction):
             error_prefix="画画失败了",
             selected_vibe_names=vibe_names,
             character_prompts=character_prompts,
+            reference_images=final_refs or None,
         )
 
     def _parse_characters(
@@ -189,8 +214,9 @@ class DrawAction(BaseImageAction):
     def _build_prompt(self, content_tags: str) -> str:
         """构建图片生成提示词。
 
-        从插件配置读取 style_reference，
-        拼接为：style_reference + content_tags。
+        从插件配置读取 style_reference，默认拼接到提示词最前面。
+        如果 content_tags 中包含 `no_style`，则跳过画风标签注入。
+        同时检查是否有匹配的预设，并注入预设内容。
 
         Args:
             content_tags: AI 已转换为英文标签的内容描述
@@ -198,13 +224,32 @@ class DrawAction(BaseImageAction):
         Returns:
             完整的提示词字符串
         """
+        # 检查是否跳过画风注入
+        skip_style = "no_style" in content_tags
+        # 清理掉 no_style 标志本身，不传给 API
+        clean_tags = content_tags.replace("no_style", "").strip().strip(",").strip()
+
         style_ref = ""
+        preset_content = ""
 
         config = getattr(self.plugin, "config", None)
         if config is not None:
-            gen = getattr(config, "generation", None)
-            if gen is not None:
-                style_ref = getattr(gen, "style_reference", "") or ""
+            # 1. 获取全局画风参考（可被 no_style 跳过）
+            if not skip_style:
+                gen = getattr(config, "generation", None)
+                if gen is not None:
+                    style_ref = getattr(gen, "style_reference", "") or ""
 
-        parts = [p for p in [style_ref.strip(), content_tags.strip()] if p]
+            # 2. 匹配预设，注入预设内容
+            prompt_cfg = getattr(config, "prompt", None)
+            if prompt_cfg and hasattr(prompt_cfg, "presets"):
+                for preset in prompt_cfg.presets:
+                    if preset.name in clean_tags or (preset.trigger and preset.trigger in clean_tags):
+                        if preset.content.strip():
+                            preset_content += "\n" + preset.content
+
+        if skip_style:
+            logger.info("LLM 请求跳过画风标签注入（no_style）")
+
+        parts = [p for p in [style_ref.strip(), preset_content.strip(), clean_tags.strip()] if p]
         return ", ".join(parts)

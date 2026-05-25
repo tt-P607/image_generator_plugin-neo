@@ -17,6 +17,10 @@ class VibeItemConfig(SectionBase):
     file: str = Field(
         description="vibes/ 目录下的文件名（支持 .naiv4vibe / .naiv4vibebundle / .png / .jpg）",
     )
+    enabled: bool = Field(
+        default=True,
+        description="是否启用此 Vibe（设为 false 可临时禁用而不需要删除配置）",
+    )
     description: str = Field(
         default="",
         description=(
@@ -30,6 +34,38 @@ class VibeItemConfig(SectionBase):
     )
     strength: float = Field(
         default=0.6,
+        description="参考强度（0.0–1.0）",
+    )
+
+
+class DirectorReferenceItemConfig(SectionBase):
+    """单个精密参考配置项。"""
+
+    file: str = Field(
+        description="vibes/ 目录下的文件名（支持 .png / .jpg）",
+    )
+    enabled: bool = Field(
+        default=True,
+        description="是否启用此参考图",
+    )
+    name: str = Field(
+        default="",
+        description="参考图名称，供 LLM 选择。如果留空则使用文件名（不含后缀）。",
+    )
+    description: str = Field(
+        default="",
+        description="该参考图的场景/形态描述，告诉模型什么时候适合使用此参考。",
+    )
+    type: str = Field(
+        default="character&style",
+        description="参考类型：character, style, 或 character&style",
+    )
+    fidelity: float = Field(
+        default=1.0,
+        description="忠实度（0.0–1.0）",
+    )
+    strength: float = Field(
+        default=1.0,
         description="参考强度（0.0–1.0）",
     )
 
@@ -276,6 +312,23 @@ class ImageGeneratorConfig(BaseConfig):
             description="LLM 可自选的 Vibe 列表（selectable_enabled=true 时生效，带场景描述帮助模型选择）",
         )
 
+    @config_section("director_reference")
+    class DirectorReferenceSection(SectionBase):
+        """精密参考 (Director Reference) 注入配置。"""
+
+        enabled: bool = Field(
+            default=False,
+            description="是否启用精密参考功能（总开关）",
+        )
+        selectable_enabled: bool = Field(
+            default=False,
+            description="是否允许 LLM 自选精密参考图",
+        )
+        selectable: list[DirectorReferenceItemConfig] = Field(
+            default_factory=list,
+            description="LLM 可自选的精密参考列表",
+        )
+
     @config_section("wardrobe")
     class WardrobeSection(SectionBase):
         """每日服装系统配置。
@@ -327,6 +380,22 @@ class ImageGeneratorConfig(BaseConfig):
                 "要求避免重复搭配，增加每日穿搭多样性。设为 0 则不参考历史。"
             ),
         )
+        selection_instructions: str = Field(
+            default=(
+                "你正在以角色本人的视角为自己挑选今天的穿搭。请像真人一样思考穿什么：\n"
+                "1. 季节适配：夏天不穿大衣和围巾，冬天不穿吊带和短裤\n"
+                "2. 时段合理：白天穿外出或日常服，傍晚可以换舒适装，深夜穿睡衣或居家服\n"
+                "3. 场景匹配：工作日偏正式/日常，周末偏休闲/运动/约会\n"
+                "4. 风格协调：上下装、鞋子、配饰之间风格统一，不要混搭冲突\n"
+                "5. 三时段有变化：不要三个时段穿一模一样的，至少深夜要换成居家/睡衣\n"
+                "6. 符合角色性格：根据角色人设选择符合其审美和气质的搭配"
+            ),
+            description=(
+                "LLM 选择每日穿搭时的额外指引（自由文本）。\n"
+                "会作为 system prompt 的一部分注入，指导 LLM 如何合理搭配。\n"
+                "可以写搭配规则、风格偏好、禁忌等。"
+            ),
+        )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     components: ComponentsSection = Field(default_factory=ComponentsSection)
@@ -335,4 +404,5 @@ class ImageGeneratorConfig(BaseConfig):
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
     vibe: VibeSection = Field(default_factory=VibeSection)
+    director_reference: DirectorReferenceSection = Field(default_factory=DirectorReferenceSection)
     wardrobe: WardrobeSection = Field(default_factory=WardrobeSection)

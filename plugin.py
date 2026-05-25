@@ -19,6 +19,7 @@ from .commands.image_command import (
 )
 from .config import ImageGeneratorConfig
 from .services.image_service import ImageGeneratorService
+from .tools import WardrobeChangeTool
 
 logger = get_logger("image_generator_plugin")
 
@@ -77,12 +78,14 @@ class ImageGeneratorPlugin(BasePlugin):
         Args:
             cfg: 插件配置实例
         """
-        # 1. 画风标签预设（强制拼接）
+        # 1. 画风标签预设（默认拼接，LLM 可通过 no_style 跳过）
         style_ref = cfg.generation.style_reference.strip()
         if style_ref:
             style_block = (
-                "【画风标签（系统自动拼接到提示词最前面，无需手动添加）】\n"
-                f"  {style_ref}"
+                "【默认画风标签（系统自动拼接到提示词最前面）】\n"
+                f"  {style_ref}\n"
+                "  ⚠️ 如果当前场景不适合此画风（如特殊形态、表情包、纯风景等），"
+                "请在 content_description 中加入 `no_style` 来跳过画风注入。"
             )
             DrawAction.action_description = (
                 DrawAction.action_description.rstrip() + "\n\n" + style_block
@@ -109,10 +112,11 @@ class ImageGeneratorPlugin(BasePlugin):
             )
             logger.debug("已将角色外观描述注入 Action description")
 
-        # 4. 结构化预设列表
-        if cfg.prompt.presets:
+        # 4. 结构化预设列表（跳过 content 为空的纯参考图预设，它们只是内部触发机制）
+        visible_presets = [p for p in cfg.prompt.presets if p.content.strip()]
+        if visible_presets:
             preset_lines = ["【预设场景指令】"]
-            for preset in cfg.prompt.presets:
+            for preset in visible_presets:
                 trigger_hint = f"（{preset.trigger}）" if preset.trigger else ""
                 preset_lines.append(
                     f"  - {preset.name}{trigger_hint}：{preset.content}"
@@ -121,7 +125,7 @@ class ImageGeneratorPlugin(BasePlugin):
                 DrawAction.action_description.rstrip()
                 + "\n\n" + "\n".join(preset_lines)
             )
-            logger.debug(f"已将 {len(cfg.prompt.presets)} 条预设注入 Action description")
+            logger.debug(f"已将 {len(visible_presets)} 条预设注入 Action description（跳过 {len(cfg.prompt.presets) - len(visible_presets)} 条空内容预设）")
 
         # 5. 自定义提示词指引（自由文本）
         custom = cfg.prompt.custom_instructions.strip()
@@ -147,6 +151,28 @@ class ImageGeneratorPlugin(BasePlugin):
                 + "\n\n" + "\n".join(vibe_lines)
             )
             logger.debug(f"已将 {len(cfg.vibe.selectable)} 个可选 Vibe 注入 Action description")
+
+        # 7. 可选精密参考列表（带场景描述）
+        if (
+            cfg.director_reference.enabled
+            and cfg.director_reference.selectable_enabled
+            and cfg.director_reference.selectable
+        ):
+            from pathlib import Path as _Path
+            ref_lines = ["【可用精密参考列表（通过 selected_director_refs 参数选择，可多选，逗号分隔）】"]
+            for item in cfg.director_reference.selectable:
+                if not getattr(item, "enabled", True):
+                    continue
+                name = item.name or _Path(item.file).stem
+                if item.description:
+                    ref_lines.append(f"  - {name}：{item.description}")
+                else:
+                    ref_lines.append(f"  - {name}")
+            DrawAction.action_description = (
+                DrawAction.action_description.rstrip()
+                + "\n\n" + "\n".join(ref_lines)
+            )
+            logger.debug(f"已将 {len(cfg.director_reference.selectable)} 个精密参考注入 Action description")
 
     async def _init_wardrobe(self, cfg: ImageGeneratorConfig) -> None:
         """初始化每日服装系统。
@@ -241,6 +267,10 @@ class ImageGeneratorPlugin(BasePlugin):
             components.append(VibeManagementCommand)
             if cfg.wardrobe.enabled:
                 components.append(WardrobeCommand)
+
+        # Tool 组件（换装工具，衣柜启用时注册）
+        if cfg.wardrobe.enabled:
+            components.append(WardrobeChangeTool)
 
         # Service 组件
         components.append(ImageGeneratorService)
