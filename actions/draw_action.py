@@ -26,6 +26,7 @@ class DrawAction(BaseImageAction):
     """AI 画图动作 — 将描述转换为 NovelAI 提示词并生成图片。"""
 
     action_name: str = "draw_image"
+    associated_types: list[str] = ["image"]
     action_description: str = (
         "执行图片生成：将画面描述转换为 NovelAI 标签式提示词并生图。\n"
         "如果需要生成多张图片，请对每张图分别调用此动作，每次调用提供独立完整的提示词。\n\n"
@@ -129,6 +130,10 @@ class DrawAction(BaseImageAction):
             logger.info(f"LLM 选择的 Vibe: {vibe_names}")
 
         # 解析多人物 JSON
+        # 容错：LLM 可能直接返回 JSON 数组对象而非字符串，此处统一规范化为字符串。
+        # 空数组视为无多人物，转成空字符串以跳过后续解析。
+        if isinstance(characters, list):
+            characters = json.dumps(characters) if characters else ""
         character_prompts: list[dict[str, Any]] | None = None
         if characters.strip():
             parsed_or_msg = self._parse_characters(characters)
