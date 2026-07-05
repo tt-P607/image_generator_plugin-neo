@@ -251,6 +251,34 @@ class ImageGeneratorConfig(BaseConfig):
                 "建议保持开启以匹配 NovelAI Web UI multi-character workspace 行为。"
             ),
         )
+        allow_skip_style: bool = Field(
+            default=True,
+            description=(
+                "是否允许 AI 通过 no_style 跳过画风标签注入。"
+                "开启（默认）：AI 可在特殊场景（表情包、纯风景等）使用 no_style 跳过画风；"
+                "关闭：强制注入画风标签，AI 无法跳过。"
+            ),
+        )
+        strip_metadata_command: bool = Field(
+            default=False,
+            description=(
+                "是否在发送命令生成的图片前剥离 PNG 元数据"
+                "（NovelAI 嵌入的种子、提示词等信息）。"
+                "开启后发送出去的图片视觉无差别但不再携带生图参数信息，"
+                "本地保存的原图仍保留完整元数据。"
+                "关闭（默认）：发送原图，保留元数据。"
+            ),
+        )
+        strip_metadata_action: bool = Field(
+            default=False,
+            description=(
+                "是否在发送 AI 自动生成（draw_image）的图片前剥离 PNG 元数据"
+                "（NovelAI 嵌入的种子、提示词等信息）。"
+                "开启后发送出去的图片视觉无差别但不再携带生图参数信息，"
+                "本地保存的原图仍保留完整元数据。"
+                "关闭（默认）：发送原图，保留元数据。"
+            ),
+        )
 
     @config_section("advanced")
     class AdvancedSection(SectionBase):
@@ -353,72 +381,20 @@ class ImageGeneratorConfig(BaseConfig):
             description="LLM 可自选的精密参考列表",
         )
 
-    @config_section("wardrobe")
-    class WardrobeSection(SectionBase):
-        """每日服装系统配置。
+    @config_section("webui")
+    class WebUISection(SectionBase):
+        """WebUI 配置。
 
-        混合模式：用户在 wardrobe_file 中手动定义衣柜（精确 tags），
-        每天由 LLM 根据季节/日期类型从衣柜中选择最合适的三时段搭配。
+        出图测试与配置编辑的可视化界面。
         """
 
         enabled: bool = Field(
             default=False,
-            description="是否启用每日服装系统",
+            description="是否将 WebUI 挂载到主程序 HTTP 服务",
         )
-        refresh_time: str = Field(
-            default="06:00",
-            description="每天刷新服装的时间（HH:MM 24h 格式）",
-        )
-        generate_model: str = Field(
-            default="",
-            description="选择服装所用模型名称（对应 model.toml 里的 name）；留空使用 ACTOR 任务默认模型",
-        )
-        wardrobe_file: str = Field(
-            default="data/image_generator_plugin-neo/wardrobe.json",
-            description="衣柜定义文件路径（用户手动维护，定义所有可选套装）",
-        )
-        state_file: str = Field(
-            default="data/image_generator_plugin-neo/wardrobe_state.json",
-            description="每日穿搭状态文件路径（系统自动更新，记录今天选择了哪套）",
-        )
-        daytime_start: int = Field(
-            default=6,
-            description="白天时段起始小时（含，24h）",
-        )
-        evening_start: int = Field(
-            default=18,
-            description="傍晚时段起始小时（含，24h）",
-        )
-        night_start: int = Field(
-            default=22,
-            description="深夜时段起始小时（含，24h）",
-        )
-        holiday_aware: bool = Field(
-            default=False,
-            description="是否启用节假日感知（开启后会检测中国法定节假日，影响当天的穿搭选择）",
-        )
-        history_days: int = Field(
-            default=3,
-            description=(
-                "生成穿搭时参考的历史天数。系统会将最近 N 天的穿搭记录传给 LLM，"
-                "要求避免重复搭配，增加每日穿搭多样性。设为 0 则不参考历史。"
-            ),
-        )
-        selection_instructions: str = Field(
-            default=(
-                "你正在以角色本人的视角为自己挑选今天的穿搭。请像真人一样思考穿什么：\n"
-                "1. 季节适配：夏天不穿大衣和围巾，冬天不穿吊带和短裤\n"
-                "2. 时段合理：白天穿外出或日常服，傍晚可以换舒适装，深夜穿睡衣或居家服\n"
-                "3. 场景匹配：工作日偏正式/日常，周末偏休闲/运动/约会\n"
-                "4. 风格协调：上下装、鞋子、配饰之间风格统一，不要混搭冲突\n"
-                "5. 三时段有变化：不要三个时段穿一模一样的，至少深夜要换成居家/睡衣\n"
-                "6. 符合角色性格：根据角色人设选择符合其审美和气质的搭配"
-            ),
-            description=(
-                "LLM 选择每日穿搭时的额外指引（自由文本）。\n"
-                "会作为 system prompt 的一部分注入，指导 LLM 如何合理搭配。\n"
-                "可以写搭配规则、风格偏好、禁忌等。"
-            ),
+        route_path: str = Field(
+            default="/plugins/image-generator",
+            description="WebUI 在主程序 HTTP 服务下的访问子路径",
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
@@ -429,4 +405,4 @@ class ImageGeneratorConfig(BaseConfig):
     prompt: PromptSection = Field(default_factory=PromptSection)
     vibe: VibeSection = Field(default_factory=VibeSection)
     director_reference: DirectorReferenceSection = Field(default_factory=DirectorReferenceSection)
-    wardrobe: WardrobeSection = Field(default_factory=WardrobeSection)
+    webui: WebUISection = Field(default_factory=WebUISection)

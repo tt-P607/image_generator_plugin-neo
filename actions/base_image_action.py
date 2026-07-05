@@ -156,7 +156,7 @@ class BaseImageAction(BaseAction):
             return await asyncio.shield(task_info.task)
         except asyncio.CancelledError:
             task_state["cancelled"] = True
-            logger.warning(f"生成图片(_core_task)等候被取消，进入后台保护执行直至发放结果。")
+            logger.warning("生成图片(_core_task)等候被取消，进入后台保护执行直至发放结果。")
             raise
 
     async def read_and_send_image(
@@ -175,7 +175,14 @@ class BaseImageAction(BaseAction):
         Returns:
             (是否成功, 消息)
         """
-        success, msg, img_base64 = ImageUtils.read_image_as_base64(image_path)
+        strip_metadata = False
+        config = getattr(self.plugin, "config", None)
+        if config is not None:
+            strip_metadata = getattr(config.generation, "strip_metadata_action", False)
+
+        success, msg, img_base64 = ImageUtils.read_image_as_base64(
+            image_path, strip_metadata=strip_metadata
+        )
 
         if not success or not img_base64:
             return False, msg

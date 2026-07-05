@@ -4,8 +4,9 @@
 """
 
 from __future__ import annotations
-
+ 
 import random
+import re as _re
 from typing import Optional
 
 from src.app.plugin_system.api.log_api import get_logger
@@ -149,9 +150,7 @@ GENERATE_ERROR_HINTS = [
 # ═════════════════════════════════════════════════════════════════════════
 #  命令行标志解析
 # ═════════════════════════════════════════════════════════════════════════
-
-import re as _re
-
+ 
 _FLAG_PATTERN = _re.compile(
     r"--scale\s+([\d.]+)|--rescale\s+([\d.]+)",
     _re.IGNORECASE,
@@ -402,7 +401,14 @@ class ImageGeneratorCommand(BaseCommand):
                     )
 
                     if success and image_path:
-                        ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
+                        strip_md = getattr(
+                            getattr(getattr(self.plugin, "config", None), "generation", None),
+                            "strip_metadata_command",
+                            False,
+                        )
+                        ok, msg, img_b64 = ImageUtils.read_image_as_base64(
+                            image_path, strip_metadata=strip_md
+                        )
                         if ok and img_b64:
                             await send_image(img_b64, stream_id=stream_id, reply_to=message_id or None)
                             await send_text(
@@ -525,7 +531,14 @@ class ImageEditCommand(BaseCommand):
             )
 
             if success and image_path:
-                ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
+                strip_md = getattr(
+                    getattr(getattr(self.plugin, "config", None), "generation", None),
+                    "strip_metadata_command",
+                    False,
+                )
+                ok, msg, img_b64 = ImageUtils.read_image_as_base64(
+                    image_path, strip_metadata=strip_md
+                )
                 if ok and img_b64:
                     await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
                     await send_text(
@@ -717,7 +730,14 @@ class ImageRefCommand(BaseCommand):
             )
 
             if success and image_path:
-                ok, msg, img_b64 = ImageUtils.read_image_as_base64(image_path)
+                strip_md = getattr(
+                    getattr(getattr(self.plugin, "config", None), "generation", None),
+                    "strip_metadata_command",
+                    False,
+                )
+                ok, msg, img_b64 = ImageUtils.read_image_as_base64(
+                    image_path, strip_metadata=strip_md
+                )
                 if ok and img_b64:
                     await send_image(img_b64, stream_id=self.stream_id, reply_to=self.message_id or None)
                     await send_text(
@@ -926,187 +946,3 @@ class VibeManagementCommand(BaseCommand):
         return await self.handle_info()
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  每日服装命令
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class WardrobeCommand(BaseCommand):
-    """每日服装系统管理命令。
-
-    用法：
-      /nai_wardrobe status                          - 查看今天三时段服装计划
-      /nai_wardrobe refresh                         - 强制重新生成今日服装
-      /nai_wardrobe list                            - 列出衣柜所有槽位和单品
-      /nai_wardrobe wear <item_id> [时段]           - 手动设置某槽位单品（当前时段或指定时段）
-      /nai_wardrobe preset <preset_id> [时段]       - 应用整套预设到某时段
-    """
-
-    command_name: str = "nai_wardrobe"
-    command_description: str = "每日服装系统 - 查看/刷新/手动设置今日穿搭"
-    permission_level: PermissionLevel = PermissionLevel.OPERATOR
-
-    def _get_manager(self):
-        """获取 wardrobe_manager，未启用时返回 None。"""
-        return getattr(self.plugin, "_wardrobe_manager", None)
-
-    @cmd_route("status")
-    async def handle_status(self) -> tuple[bool, str]:
-        """查看今天三个时段的服装计划。"""
-        wardrobe_manager = self._get_manager()
-        if wardrobe_manager is None:
-            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
-            return False, "服装系统未启用"
-
-        summary = wardrobe_manager.get_all_segments_summary()
-        await send_text(summary, stream_id=self.stream_id)
-        return True, "ok"
-
-    @cmd_route("list")
-    async def handle_list(self) -> tuple[bool, str]:
-        """列出衣柜中所有槽位和单品。"""
-        wardrobe_manager = self._get_manager()
-        if wardrobe_manager is None:
-            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
-            return False, "服装系统未启用"
-
-        wardrobe = wardrobe_manager.load_wardrobe()
-        slots = wardrobe.get("slots", {})
-        presets = wardrobe.get("presets", {})
-
-        if not slots:
-            await send_text("衣柜是空的！请编辑 wardrobe.json 添加槽位和单品。", stream_id=self.stream_id)
-            return True, "ok"
-
-        lines: list[str] = ["👗 衣柜内容：\n"]
-        for slot_name, items in slots.items():
-            lines.append(f"【{slot_name}】（{len(items)} 件）")
-            for item in items:
-                tags_preview = item.get("tags", "")[:50]
-                if len(item.get("tags", "")) > 50:
-                    tags_preview += "…"
-                lines.append(f"  [{item['id']}] {item.get('name', '')}  {tags_preview}")
-
-        if presets:
-            lines.append("\n📦 预设套装：")
-            for preset_id, preset in presets.items():
-                lines.append(f"  [{preset_id}] {preset.get('name', '')} - {preset.get('description', '')}")
-
-        await send_text("\n".join(lines), stream_id=self.stream_id)
-        return True, "ok"
-
-    @cmd_route("wear")
-    async def handle_wear(self, item_id: str = "", segment: str = "") -> tuple[bool, str]:
-        """手动将某单品设置到当前时段对应槽位。
-
-        用法：/nai_wardrobe wear <item_id> [daytime|evening|night]
-        系统会自动在衣柜中查找该 item_id 所属的槽位。
-        """
-        from ..wardrobe.outfit_generator import inject_outfit_hint
-        from ..wardrobe.outfit_manager import ALL_SEGMENTS, SEGMENT_DISPLAY_NAMES
-        from ..actions.draw_action import DrawAction
-
-        wardrobe_manager = self._get_manager()
-        if wardrobe_manager is None:
-            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
-            return False, "服装系统未启用"
-
-        if not item_id:
-            await send_text(
-                "用法：/nai_wardrobe wear <单品id> [daytime|evening|night]\n"
-                "使用 /nai_wardrobe list 查看所有单品 id。",
-                stream_id=self.stream_id,
-            )
-            return False, "缺少参数"
-
-        found = wardrobe_manager.find_item_globally(item_id)
-        if found is None:
-            await send_text(
-                f"找不到 id 为 {item_id!r} 的单品，请使用 /nai_wardrobe list 查看可用 id。",
-                stream_id=self.stream_id,
-            )
-            return False, "单品不存在"
-
-        slot_name, item = found
-        target_segment = segment.strip() if segment.strip() in ALL_SEGMENTS else wardrobe_manager.get_current_segment()
-
-        wardrobe_manager.override_segment_slot(target_segment, slot_name, item_id)
-        inject_outfit_hint(wardrobe_manager, DrawAction)
-
-        seg_name = SEGMENT_DISPLAY_NAMES.get(target_segment, target_segment)
-        await send_text(
-            f"✅ 已将{seg_name}的【{slot_name}】设置为：{item.get('name', item_id)}\n"
-            f"tags: {item.get('tags', '')}",
-            stream_id=self.stream_id,
-        )
-        return True, "ok"
-
-    @cmd_route("preset")
-    async def handle_preset(self, preset_id: str = "", segment: str = "") -> tuple[bool, str]:
-        """将整套预设应用到某时段。
-
-        用法：/nai_wardrobe preset <preset_id> [daytime|evening|night]
-        """
-        from ..wardrobe.outfit_generator import inject_outfit_hint
-        from ..wardrobe.outfit_manager import ALL_SEGMENTS, SEGMENT_DISPLAY_NAMES
-        from ..actions.draw_action import DrawAction
-
-        wardrobe_manager = self._get_manager()
-        if wardrobe_manager is None:
-            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
-            return False, "服装系统未启用"
-
-        if not preset_id:
-            presets = wardrobe_manager.get_presets()
-            if not presets:
-                await send_text("衣柜中没有任何预设，请在 wardrobe.json 的 presets 中定义。", stream_id=self.stream_id)
-            else:
-                lines = ["可用预设："]
-                for pid, p in presets.items():
-                    lines.append(f"  [{pid}] {p.get('name', '')} - {p.get('description', '')}")
-                await send_text("\n".join(lines), stream_id=self.stream_id)
-            return False, "缺少参数"
-
-        target_segment = segment.strip() if segment.strip() in ALL_SEGMENTS else wardrobe_manager.get_current_segment()
-        success = wardrobe_manager.apply_preset(preset_id, target_segment)
-        if not success:
-            await send_text(f"预设 {preset_id!r} 不存在，使用 /nai_wardrobe preset 查看可用预设。", stream_id=self.stream_id)
-            return False, "预设不存在"
-
-        inject_outfit_hint(wardrobe_manager, DrawAction)
-        seg_name = SEGMENT_DISPLAY_NAMES.get(target_segment, target_segment)
-        presets = wardrobe_manager.get_presets()
-        preset_name = presets.get(preset_id, {}).get("name", preset_id)
-        await send_text(f"✅ 已将{seg_name}的穿搭设为预设「{preset_name}」", stream_id=self.stream_id)
-        return True, "ok"
-
-    @cmd_route("refresh")
-    async def handle_refresh(self) -> tuple[bool, str]:
-        """强制重新生成今日服装（覆盖已有数据）。"""
-        from ..config import ImageGeneratorConfig
-        from ..wardrobe.outfit_generator import generate_daily_outfit, inject_outfit_hint
-        from ..actions.draw_action import DrawAction
-
-        wardrobe_manager = self._get_manager()
-        if wardrobe_manager is None:
-            await send_text("每日服装系统未启用或尚未初始化。", stream_id=self.stream_id)
-            return False, "服装系统未启用"
-
-        cfg = self.plugin.config
-        if not isinstance(cfg, ImageGeneratorConfig):
-            return False, "配置异常"
-
-        await send_text("正在重新生成今日服装计划，稍等…", stream_id=self.stream_id)
-
-        # 删除旧状态强制重新生成
-        wardrobe_manager.state_file.unlink(missing_ok=True)
-
-        ok = await generate_daily_outfit(wardrobe_manager, cfg)
-        if not ok:
-            await send_text("服装生成失败了，请检查衣柜配置（wardrobe.json）是否正确。", stream_id=self.stream_id)
-            return False, "生成失败"
-
-        inject_outfit_hint(wardrobe_manager, DrawAction)
-        summary = wardrobe_manager.get_all_segments_summary()
-        await send_text(f"✅ 今日服装已更新！\n\n{summary}", stream_id=self.stream_id)
-        return True, "ok"

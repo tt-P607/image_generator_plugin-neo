@@ -23,14 +23,21 @@ logger = get_logger("image_generator_plugin.draw_action")
 
 
 class DrawAction(BaseImageAction):
-    """AI 画图动作 — 将描述转换为 NovelAI 提示词并生成图片。"""
+    """AI 画图动作 — 将描述转换为 NovelAI 提示词并生成图片。
+
+    内置会话级图片记忆：每次出图后自动保存该聊天流的上次提示词，
+    下次激活时注入到 action_description，供模型保持服装与场景一致性。
+    """
+
+    # 会话级图片记忆：stream_id -> 上次出图的 content_description
+    _image_memory: dict[str, str] = {}
+
+    # 记忆块标记，用于定位和替换
+    _MEMORY_MARKER: str = "\n\n【上次出图 tags 参考】"
 
     action_name: str = "draw_image"
     associated_types: list[str] = ["image"]
     action_description: str = (
-        "执行图片生成：将画面描述转换为 NovelAI 标签式提示词并生图。\n"
-        "如果需要生成多张图片，请对每张图分别调用此动作，每次调用提供独立完整的提示词。\n\n"
-        "=== NovelAI 提示词语法指南 ===\n\n"
         "**1. 基础结构**\n"
         "提示词必须为英文、半角逗号分隔的标签式结构。越靠前权重越高。\n"
         "推荐顺序：风格 → 人数/性别 → 角色身份 → 身体特征 → "
@@ -76,6 +83,29 @@ class DrawAction(BaseImageAction):
     primary_action: bool = True
     chat_type: ChatType = ChatType.ALL
 
+    async def go_activate(self) -> bool:
+        """激活时注入上次出图记忆到 action_description（按聊天流隔离）。"""
+        stream_id = getattr(self.chat_stream, "stream_id", "")
+        if not stream_id:
+            return True
+
+        last_tags = self._image_memory.get(stream_id)
+        if last_tags:
+            # 移除旧的记忆块（如果存在），再追加新的
+            base_desc = DrawAction.action_description
+            if self._MEMORY_MARKER in base_desc:
+                base_desc = base_desc.split(self._MEMORY_MARKER)[0].rstrip()
+            memory_block = (
+                f"{self._MEMORY_MARKER}\n{last_tags}\n"
+                "⚠️ 如果当前聊天流在连续叙事中，请尽可能保持场景和服装的一致性，"
+                "使用与上次相同的服装和场景 tags。如需换装或切换场景，"
+                "请在 content_description 中写明新的标签。"
+            )
+            type(self).action_description = base_desc + memory_block
+            logger.debug(f"已注入上次出图记忆 (stream={stream_id[:8]})")
+
+        return True
+
     async def execute(
         self,
         content_description: Annotated[
@@ -118,6 +148,7 @@ class DrawAction(BaseImageAction):
         width, height = self._parse_resolution(resolution, default="832x1216")
 
         prompt = self._build_prompt(content_description)
+
         logger.info(f"AI 画图 - 提示词: {prompt}, 画幅: {width}x{height}")
 
         if negative_prompt:
@@ -161,7 +192,7 @@ class DrawAction(BaseImageAction):
 
         final_refs = ref_images
 
-        return await self.generate_and_send_image(
+        result = await self.generate_and_send_image(
             prompt=prompt,
             negative_prompt=negative_prompt or None,
             width=width,
@@ -172,6 +203,15 @@ class DrawAction(BaseImageAction):
             character_prompts=character_prompts,
             reference_images=final_refs or None,
         )
+
+        # 出图成功后保存 content_description 到会话级记忆
+        if result[0]:
+            stream_id = getattr(self.chat_stream, "stream_id", "")
+            if stream_id:
+                self._image_memory[stream_id] = content_description
+                logger.debug(f"已保存上次出图 tags 到会话记忆 (stream={stream_id[:8]})")
+
+        return result
 
     def _parse_characters(
         self, raw: str
@@ -229,8 +269,15 @@ class DrawAction(BaseImageAction):
         Returns:
             完整的提示词字符串
         """
-        # 检查是否跳过画风注入
-        skip_style = "no_style" in content_tags
+        # 检查是否跳过画风注入（受 allow_skip_style 开关控制）
+        allow_skip = True
+        config = getattr(self.plugin, "config", None)
+        if config is not None:
+            gen = getattr(config, "generation", None)
+            if gen is not None:
+                allow_skip = getattr(gen, "allow_skip_style", True)
+
+        skip_style = allow_skip and "no_style" in content_tags
         # 清理掉 no_style 标志本身，不传给 API
         clean_tags = content_tags.replace("no_style", "").strip().strip(",").strip()
 

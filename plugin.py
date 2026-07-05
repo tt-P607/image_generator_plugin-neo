@@ -15,11 +15,10 @@ from .commands.image_command import (
     ImageGeneratorCommand,
     ImageRefCommand,
     VibeManagementCommand,
-    WardrobeCommand,
 )
 from .config import ImageGeneratorConfig
+from .router import WebUIRouter
 from .services.image_service import ImageGeneratorService
-from .tools import WardrobeChangeTool
 
 logger = get_logger("image_generator_plugin")
 
@@ -33,7 +32,7 @@ class ImageGeneratorPlugin(BasePlugin):
 
     plugin_name: str = "image_generator_plugin-neo"
     plugin_description: str = "基于 NovelAI 官方 API 的 AI 图片生成插件"
-    plugin_version: str = "2.1.0"
+    plugin_version: str = "2.2.0"
 
     configs = [ImageGeneratorConfig]
 
@@ -45,7 +44,6 @@ class ImageGeneratorPlugin(BasePlugin):
         """
         super().__init__(config)
         self.image_service: ImageGeneratorService | None = None
-        self._wardrobe_manager = None
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后的回调，初始化服务并注入动态信息。"""
@@ -56,7 +54,6 @@ class ImageGeneratorPlugin(BasePlugin):
 
         try:
             logger.info("初始化 ImageGeneratorPlugin...")
-
             self.image_service = ImageGeneratorService(self)
             await self.image_service.initialize()
 
@@ -68,25 +65,27 @@ class ImageGeneratorPlugin(BasePlugin):
         # === 注入动态信息到 Action 的 description ===
         self._inject_action_description(cfg)
 
-        # === 每日服装系统初始化 ===
-        if cfg.wardrobe.enabled:
-            await self._init_wardrobe(cfg)
-
     def _inject_action_description(self, cfg: ImageGeneratorConfig) -> None:
         """将配置中的动态信息注入到 Action description。
 
         Args:
             cfg: 插件配置实例
         """
-        # 1. 画风标签预设（默认拼接，LLM 可通过 no_style 跳过）
+        # 1. 画风标签预设（默认拼接，LLM 可通过 no_style 跳过——可由 allow_skip_style 关闭）
         style_ref = cfg.generation.style_reference.strip()
         if style_ref:
+            allow_skip = cfg.generation.allow_skip_style
             style_block = (
                 "【默认画风标签（系统自动拼接到提示词最前面）】\n"
                 f"  {style_ref}\n"
-                "  ⚠️ 如果当前场景不适合此画风（如特殊形态、表情包、纯风景等），"
-                "请在 content_description 中加入 `no_style` 来跳过画风注入。"
             )
+            if allow_skip:
+                style_block += (
+                    "  ⚠️ 如果当前场景不适合此画风（如特殊形态、表情包、纯风景等），"
+                    "请在 content_description 中加入 `no_style` 来跳过画风注入。"
+                )
+            else:
+                style_block += "  ⚠️ 画风标签为强制注入，不可跳过。"
             DrawAction.action_description = (
                 DrawAction.action_description.rstrip() + "\n\n" + style_block
             )
@@ -174,70 +173,6 @@ class ImageGeneratorPlugin(BasePlugin):
             )
             logger.debug(f"已将 {len(cfg.director_reference.selectable)} 个精密参考注入 Action description")
 
-    async def _init_wardrobe(self, cfg: ImageGeneratorConfig) -> None:
-        """初始化每日服装系统。
-
-        Args:
-            cfg: 插件配置实例
-        """
-        from .wardrobe.outfit_manager import OutfitManager
-        from .wardrobe.outfit_generator import (
-            generate_daily_outfit,
-            register_wardrobe_scheduler,
-        )
-
-        wardrobe_manager = OutfitManager(
-            cfg.wardrobe.wardrobe_file,
-            cfg.wardrobe.state_file,
-            daytime_start=cfg.wardrobe.daytime_start,
-            evening_start=cfg.wardrobe.evening_start,
-            night_start=cfg.wardrobe.night_start,
-        )
-
-        # 今天还没有数据则立即生成
-        if not wardrobe_manager.is_today():
-            ok = await generate_daily_outfit(wardrobe_manager, cfg)
-            if not ok:
-                logger.warning("启动时服装生成失败，将在下次定时检查时重试")
-
-        # 把当前时段 tags 注入 Action description
-        outfit_tags = wardrobe_manager.get_current_tags()
-        if outfit_tags:
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
-                + f"\n\n【当前时段服装标签（画自己时优先使用）】\n{outfit_tags}"
-            )
-            logger.debug("已将当前时段服装标签注入 Action description")
-
-        # 注册每小时检查任务
-        from src.kernel.concurrency import get_task_manager
-
-        async def _delayed_wardrobe_register() -> None:
-            import asyncio
-
-            from src.kernel.scheduler import get_unified_scheduler
-
-            for _ in range(30):
-                await asyncio.sleep(1.0)
-                try:
-                    scheduler = get_unified_scheduler()
-                    if getattr(scheduler, "_running", False):
-                        await register_wardrobe_scheduler(wardrobe_manager, cfg, DrawAction)
-                        return
-                except Exception:
-                    continue
-            logger.warning("等待调度器启动超时(30s)，放弃注册穿搭检查任务")
-
-        get_task_manager().create_task(
-            _delayed_wardrobe_register(),
-            name="image_generator_wardrobe_init",
-            daemon=True,
-        )
-
-        # 将 wardrobe_manager 挂到 plugin 实例上，供 WardrobeCommand 使用
-        self._wardrobe_manager = wardrobe_manager
-        logger.info("每日服装系统已初始化")
-
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的回调，清理资源。"""
         if self.image_service:
@@ -265,14 +200,12 @@ class ImageGeneratorPlugin(BasePlugin):
             components.append(ImageEditCommand)
             components.append(ImageRefCommand)
             components.append(VibeManagementCommand)
-            if cfg.wardrobe.enabled:
-                components.append(WardrobeCommand)
-
-        # Tool 组件（换装工具，衣柜启用时注册）
-        if cfg.wardrobe.enabled:
-            components.append(WardrobeChangeTool)
 
         # Service 组件
         components.append(ImageGeneratorService)
+
+        # WebUI Router（WebUI 启用时注册）
+        if cfg.webui.enabled:
+            components.append(WebUIRouter)
 
         return components

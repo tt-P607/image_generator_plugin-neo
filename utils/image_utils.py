@@ -4,9 +4,12 @@
 """
 
 import base64
+import io
 import os
 from pathlib import Path
 from typing import Optional
+
+from PIL import Image
 
 from src.app.plugin_system.api.log_api import get_logger
 
@@ -17,11 +20,17 @@ class ImageUtils:
     """图片处理工具类。"""
 
     @staticmethod
-    def read_image_as_base64(image_path: str) -> tuple[bool, str, Optional[str]]:
+    def read_image_as_base64(
+        image_path: str,
+        *,
+        strip_metadata: bool = False,
+    ) -> tuple[bool, str, Optional[str]]:
         """读取图片文件并转换为 base64 编码。
 
         Args:
             image_path: 图片文件路径
+            strip_metadata: 是否剥离 PNG 元数据（种子、提示词等生图信息）。
+                开启后仅影响编码结果，不修改磁盘上的原文件。
 
         Returns:
             (是否成功, 错误消息或成功提示, base64 编码或 None)
@@ -38,8 +47,11 @@ class ImageUtils:
 
             logger.info(f"读取图片: {image_path}, 大小: {file_size} 字节 ({file_size / 1024:.2f} KB)")
 
-            with open(image_path, "rb") as f:
-                img_data = f.read()
+            if strip_metadata:
+                img_data = ImageUtils.strip_png_metadata(image_path)
+            else:
+                with open(image_path, "rb") as f:
+                    img_data = f.read()
 
             if len(img_data) == 0:
                 logger.error("读取的图片数据为空")
@@ -53,6 +65,30 @@ class ImageUtils:
         except Exception as e:
             logger.error(f"读取或编码图片失败: {e}", exc_info=True)
             return False, f"读取图片失败: {e}", None
+
+    @staticmethod
+    def strip_png_metadata(image_path: str) -> bytes:
+        """剥离 PNG 元数据并返回干净的字节数据。
+
+        使用 PIL 重新保存图片到内存，去除所有 PNG 辅助块
+        （包括 NovelAI 嵌入的 Comment、Software、Generation Time 等）。
+        图片像素数据保持不变，视觉无差别。
+
+        Args:
+            image_path: 图片文件路径
+
+        Returns:
+            剥离元数据后的 PNG 字节数据
+        """
+        with Image.open(image_path) as img:
+            # 将图片强制转换为 RGB 模式，以完全丢弃可能包含元数据隐写的 Alpha 通道
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            # 清空 PIL 读取到的文本元数据，防止 save() 重新写入 tEXt/iTXt chunk
+            img.info.clear()
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=False)
+            return buf.getvalue()
 
     @staticmethod
     def validate_image_file(image_path: str) -> tuple[bool, str]:

@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>NAI 绘图工作台</title>
+<style>
+:root {
+  --bg: #1a1714;
+  --bg-2: #221d19;
+  --panel: #2b241f;
+  --panel-2: #332a23;
+  --ink: #f5e8d5;
+  --ink-dim: #a89886;
+  --ink-muted: #6b5d50;
+  --line: rgba(245, 232, 213, 0.08);
+  --line-2: rgba(245, 232, 213, 0.15);
+  --accent: #d97742;
+  --accent-2: #e8a065;
+  --accent-soft: rgba(217, 119, 66, 0.12);
+  --green: #7ba85e;
+  --red: #cc5841;
+  --yellow: #d4a843;
+  --radius: 12px;
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-2); text-decoration: none; }
+button {
+  font-family: inherit; font-size: 13px; cursor: pointer;
+  border: none; border-radius: 8px; padding: 8px 16px;
+  transition: all 0.15s ease;
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* 布局 */
+.shell { max-width: 1400px; margin: 0 auto; padding: 24px 28px 80px; }
+.tabs {
+  display: flex; gap: 4px; margin-bottom: 24px;
+  background: var(--bg-2); border-radius: var(--radius);
+  padding: 6px;
+}
+.tab-btn {
+  flex: 1; background: none; color: var(--ink-dim);
+  padding: 10px 20px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 14px; font-weight: 500;
+}
+.tab-btn:hover { color: var(--ink); background: var(--panel); }
+.tab-btn.active { color: var(--bg); background: var(--accent); font-weight: 600; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+}
+.panel h2 { font-size: 17px; margin-bottom: 4px; }
+.note { color: var(--ink-dim); font-size: 12px; margin-bottom: 16px; }
+
+/* 表单 */
+label { display: block; font-size: 12px; color: var(--ink-dim); margin-bottom: 6px; font-weight: 500; }
+input[type="text"], input[type="number"], textarea, select {
+  width: 100%; background: var(--bg-2); color: var(--ink);
+  border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 9px 12px; font-family: inherit; font-size: 13px;
+  outline: none; transition: border-color 0.15s;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+textarea { resize: vertical; min-height: 60px; line-height: 1.4; }
+select option { background: var(--panel); }
+
+.row { display: flex; gap: 12px; }
+.row > * { flex: 1; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+/* 按钮 */
+.btn-primary { background: var(--accent); color: var(--bg); font-weight: 600; }
+.btn-primary:hover { background: var(--accent-2); }
+.btn-ghost { background: var(--bg-2); color: var(--ink-dim); border: 1px solid var(--line-2); }
+.btn-ghost:hover { color: var(--ink); }
+.btn-danger { background: rgba(204, 88, 65, 0.15); color: var(--red); }
+.btn-danger:hover { background: var(--red); color: white; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
+
+/* 出图预览 */
+.preview-img { width: 100%; border-radius: var(--radius); border: 1px solid var(--line); }
+.preview-placeholder {
+  background: var(--bg-2); border: 1px dashed var(--line-2);
+  border-radius: var(--radius); padding: 48px 20px; text-align: center;
+  color: var(--ink-muted);
+}
+.result-box {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; font-size: 12px; max-height: 120px; overflow-y: auto;
+  word-break: break-all; font-family: monospace, monospace;
+}
+
+.card {
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px; margin-bottom: 8px;
+}
+.card-title { font-size: 14px; font-weight: 600; }
+.card-sub { font-size: 12px; color: var(--ink-muted); margin: 2px 0 8px; }
+
+/* 状态指示 */
+.status-ok { color: var(--green); }
+.status-err { color: var(--red); }
+.status-text { font-size: 12px; color: var(--ink-dim); }
+
+/* 杂项 */
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.toggle input { width: auto; }
+.mini-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.empty-state { color: var(--ink-muted); padding: 20px; text-align: center; }
+.section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.section-head h2 { margin: 0; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-muted); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="generate" id="tabBtnGenerate">🖼️ 出图测试</button>
+    <button class="tab-btn" data-tab="config" id="tabBtnConfig">⚙️ 配置编辑</button>
+  </div>
+
+  <!-- ════ 出图测试 ════ -->
+  <div class="tab-page" id="tabGenerate">
+    <div class="panel">
+      <div class="section-head"><h2>出图测试</h2></div>
+      <p class="note">写正面提示词，选画幅，点出图。</p>
+      <div class="row" style="margin-bottom: 12px;">
+        <div>
+          <label>正面提示词</label>
+          <textarea id="genPrompt" placeholder="输入英文 NovelAI 标签或自然语言描述，如：1girl, looking at viewer, smile, outdoor" style="min-height:80px"></textarea>
+        </div>
+        <div>
+          <label>负面提示词（可留空）</label>
+          <textarea id="genNegative" placeholder="英文标签，排除不想要的画面元素，如：lowres, bad anatomy, bad hands, text" style="min-height:80px"></textarea>
+        </div>
+      </div>
+      <div class="grid-3" style="margin-bottom: 12px;">
+        <div>
+          <label>画幅</label>
+          <select id="genResolution">
+            <option value="832x1216">竖图 832×1216</option>
+            <option value="1216x832">横图 1216×832</option>
+            <option value="1024x1024">方图 1024×1024</option>
+          </select>
+        </div>
+        <div>
+          <label>Scale（留空用配置值）</label>
+          <input type="number" id="genScale" step="0.1" placeholder="5.0" />
+        </div>
+        <div>
+          <label>CFG Rescale（留空用配置值）</label>
+          <input type="number" id="genRescale" step="0.1" placeholder="0.0" />
+        </div>
+      </div>
+      <div class="toolbar" style="margin-bottom:12px; gap:6px">
+        <button class="btn-ghost btn-sm" id="genToggleStyle">➕ 填入画风标签</button>
+        <button class="btn-ghost btn-sm" id="genToggleNegative">➕ 填入负面提示词</button>
+      </div>
+      <div class="toolbar">
+        <button class="btn-primary" id="genBtn">🚀 出图</button>
+        <span id="genStatus" class="status-text"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="section-head"><h2>结果预览</h2></div>
+      <div id="genPreview">
+        <div class="preview-placeholder">尚未出图，填好提示词后点上方按钮</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ 配置编辑 ════ -->
+  <div class="tab-page" id="tabConfig" style="display:none">
+    <div class="panel">
+      <div class="section-head"><h2>生图参数</h2></div>
+      <div class="grid-3" style="margin-bottom:12px">
+        <div><label>模型</label><input type="text" id="cfgModel" /></div>
+        <div><label>采样器</label><input type="text" id="cfgSampler" /></div>
+        <div><label>噪声调度</label><select id="cfgNoiseSchedule">
+          <option value="karras">karras</option><option value="native">native</option>
+          <option value="exponential">exponential</option><option value="polyexponential">polyexponential</option>
+        </select></div>
+      </div>
+      <div class="grid-3" style="margin-bottom:12px">
+        <div><label>默认分辨率</label><select id="cfgResolution">
+          <option value="832x1216">832x1216</option><option value="1216x832">1216x832</option><option value="1024x1024">1024x1024</option>
+        </select></div>
+        <div><label>步数</label><input type="number" id="cfgSteps" /></div>
+        <div><label>引导比例</label><input type="number" step="0.1" id="cfgScale" /></div>
+      </div>
+      <div class="grid-3" style="margin-bottom:12px">
+        <div><label>CFG Rescale</label><input type="number" step="0.1" id="cfgPromptRescale" /></div>
+        <div><label>UC Preset</label><select id="cfgUcPreset">
+          <option value="0">0 (Strong)</option><option value="1">1 (Light)</option><option value="2">2 (Furry)</option><option value="3">3 (Human)</option><option value="4">4 (None)</option>
+        </select></div>
+        <div><label>Variety+</label><select id="cfgVarietyPlus"><option value="false">关闭</option><option value="true">开启</option></select></div>
+      </div>
+      <div style="margin-bottom:12px">
+        <label>画风标签（自动拼接到提示词最前）</label>
+        <textarea id="cfgStyleReference" placeholder="如：masterpiece, best quality, anime style..."></textarea>
+      </div>
+      <div style="margin-bottom:12px">
+        <label>角色外观描述（画自己时参考）</label>
+        <textarea id="cfgCharacterPrompt" placeholder="如：1girl, silver hair, blue eyes..."></textarea>
+      </div>
+      <div style="margin-bottom:12px">
+        <label>全局负面提示词</label>
+        <textarea id="cfgNegativePrompt" style="min-height:60px"></textarea>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2>提示词预设</h2><button class="btn-sm btn-ghost" id="addPresetPBtn">➕ 新增预设</button></div>
+      <p class="note">预设会按名称/触发词匹配到 prompt 中注入对应内容。</p>
+      <div id="cfgPresetsContainer"></div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2>Vibe 参考图</h2></div>
+      <label class="toggle" style="margin-bottom:8px"><input type="checkbox" id="cfgVibeAlwaysEnabled" /> 启用始终注入 Vibe</label>
+      <label class="toggle" style="margin-bottom:8px"><input type="checkbox" id="cfgVibeSelectableEnabled" /> 启用 LLM 自选 Vibe</label>
+      <div class="section-head" style="margin-top:12px">
+        <h3 style="font-size:14px">始终注入（always 列表）</h3>
+        <button class="btn-sm btn-ghost" id="addVibeAlwaysBtn">➕ 新增</button>
+      </div>
+      <div id="cfgVibeAlwaysContainer"></div>
+      <div class="section-head" style="margin-top:12px">
+        <h3 style="font-size:14px">LLM 可选（selectable 列表）</h3>
+        <button class="btn-sm btn-ghost" id="addVibeSelectableBtn">➕ 新增</button>
+      </div>
+      <div id="cfgVibeSelectableContainer"></div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2>精确参考 (Director Reference)</h2></div>
+      <label class="toggle" style="margin-bottom:8px"><input type="checkbox" id="cfgDrEnabled" /> 启用精确参考</label>
+      <label class="toggle" style="margin-bottom:8px"><input type="checkbox" id="cfgDrSelectableEnabled" /> 启用 LLM 自选</label>
+      <div class="section-head" style="margin-top:12px">
+        <h3 style="font-size:14px">LLM 可选参考列表</h3>
+        <button class="btn-sm btn-ghost" id="addDrBtn">➕ 新增</button>
+      </div>
+      <div id="cfgDrContainer"></div>
+    </div>
+
+    <div class="panel">
+      <div class="section-head"><h2>自定义提示词指引</h2></div>
+      <textarea id="cfgCustomInstructions" style="min-height:80px" placeholder="写任何你想让模型在画图时遵循的规则或偏好..."></textarea>
+    </div>
+
+    <div class="toolbar">
+      <button class="btn-primary" id="cfgSaveBtn">💾 保存配置到文件</button>
+      <button class="btn-ghost" id="cfgReloadBtn">🔄 重新载入</button>
+      <span id="cfgStatus" class="status-text"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const mbase = window.location.pathname.replace(/\/$/, '');
+async function api(url, opts = {}) {
+  const r = await fetch(mbase + url, { headers: {'Content-Type':'application/json'}, cache:'no-store', ...opts });
+  const t = await r.text();
+  const d = t ? JSON.parse(t) : {};
+  if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+  return d;
+}
+
+// 转义
+function esc(s) { return String(s||'').replace(/[&\x3c\x3e"']/g, function(c) { return {'\x26':'\x26amp;','\x3c':'\x3c','\x3e':'\x3e','"':'\x26quot;',"'":'\x26#39;'}[c]; }); }
+
+// ════ Tab 切换 ════
+document.querySelectorAll('.tab-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    var tab = btn.dataset.tab;
+    document.querySelectorAll('.tab-page').forEach(function(p) { p.style.display = 'none'; });
+    var pageId = 'tab' + tab.charAt(0).toUpperCase() + tab.slice(1);
+    var page = document.getElementById(pageId);
+    if (page) page.style.display = 'block';
+    if (tab === 'config') loadConfig();
+  });
+});
+
+// ════ 出图测试 ════
+// 页面加载时从配置读取实际值填入 placeholder
+var genCfgData = null;
+(async function() {
+  try {
+    genCfgData = await api('/api/config');
+    var g = genCfgData.generation || {};
+    if (g.scale !== undefined) document.getElementById('genScale').placeholder = String(g.scale);
+    if (g.promptGuidanceRescale !== undefined) document.getElementById('genRescale').placeholder = String(g.promptGuidanceRescale);
+  } catch(e) {}
+})();
+
+// 画画风标签增删
+var styleInPrompt = false;
+document.getElementById('genToggleStyle').addEventListener('click', function() {
+  if (!genCfgData || !genCfgData.generation || !genCfgData.generation.styleReference) { alert('配置中无画画风标签'); return; }
+  var inp = document.getElementById('genPrompt');
+  var style = genCfgData.generation.styleReference.trim();
+  if (!styleInPrompt) {
+    inp.value = style + ', ' + inp.value;
+    styleInPrompt = true;
+    document.getElementById('genToggleStyle').textContent = '➖ 移除画画风标签';
+  } else {
+    inp.value = inp.value.replace(new RegExp('^' + style.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*,\\s*'), '');
+    styleInPrompt = false;
+    document.getElementById('genToggleStyle').textContent = '➕ 填入画画风标签';
+  }
+});
+
+// 负面提示词增删
+var negativeInPrompt = false;
+document.getElementById('genToggleNegative').addEventListener('click', function() {
+  if (!genCfgData || !genCfgData.generation || !genCfgData.generation.negativePrompt) { alert('配置中无负面提示词'); return; }
+  var inp = document.getElementById('genNegative');
+  var neg = genCfgData.generation.negativePrompt.trim();
+  if (!negativeInPrompt) {
+    var cur = inp.value.trim();
+    inp.value = cur ? (neg + ', ' + cur) : neg;
+    negativeInPrompt = true;
+    document.getElementById('genToggleNegative').textContent = '➖ 移除负面提示词';
+  } else {
+    inp.value = inp.value.replace(new RegExp('^' + neg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*,\\s*'), '').replace(new RegExp('^' + neg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '');
+    negativeInPrompt = false;
+    document.getElementById('genToggleNegative').textContent = '➕ 填入负面提示词';
+  }
+});
+
+document.getElementById('genBtn').addEventListener('click', async function() {
+  var prompt = document.getElementById('genPrompt').value.trim();
+  if (!prompt) { document.getElementById('genStatus').textContent = '请填写正面提示词'; return; }
+  var btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  document.getElementById('genStatus').textContent = '正在出图\u2026';
+  document.getElementById('genPreview').innerHTML = '\x3cdiv class="preview-placeholder"\x3e正在生成图片，请稍候\u2026\x3c/div\x3e';
+  try {
+    var body = {
+      prompt: prompt,
+      negative_prompt: document.getElementById('genNegative').value.trim(),
+      resolution: document.getElementById('genResolution').value,
+    };
+    var scaleVal = document.getElementById('genScale').value.trim();
+    if (scaleVal) body.scale = parseFloat(scaleVal);
+    var rescaleVal = document.getElementById('genRescale').value.trim();
+    if (rescaleVal) body.cfg_rescale = parseFloat(rescaleVal);
+    var r = await api('/api/generate', { method:'POST', body: JSON.stringify(body) });
+    document.getElementById('genPreview').innerHTML = '\x3cimg class="preview-img" src="' + r.imageDataUrl + '" alt="preview" /\x3e';
+    var scaleText = r.actualScale !== undefined ? r.actualScale : '-';
+    var rescaleText = r.actualCfgRescale !== undefined ? r.actualCfgRescale : '-';
+    var resText = r.actualResolution || '-';
+    document.getElementById('genStatus').textContent = '\u2705 出图成功 | Scale: ' + scaleText + ' | Rescale: ' + rescaleText + ' | ' + resText;
+  } catch (e) {
+    document.getElementById('genPreview').innerHTML = '\x3cdiv class="preview-placeholder"\x3e' + esc(e.message) + '\x3c/div\x3e';
+    document.getElementById('genStatus').textContent = '\u274c 失败';
+  }
+  btn.disabled = false;
+});
+
+// ════ 配置编辑 ════
+let cfgData = null;
+
+async function loadConfig() {
+  try {
+    cfgData = await api('/api/config');
+    fillConfigForm(cfgData);
+    renderConfigLists(cfgData);
+    document.getElementById('cfgStatus').textContent = '';
+  } catch (e) {
+    document.getElementById('cfgStatus').textContent = '加载失败: ' + e.message;
+  }
+}
+
+function fillConfigForm(d) {
+  const g = d.generation || {};
+  document.getElementById('cfgModel').value = g.model || '';
+  document.getElementById('cfgSampler').value = g.sampler || '';
+  document.getElementById('cfgNoiseSchedule').value = g.noiseSchedule || 'karras';
+  document.getElementById('cfgResolution').value = g.resolution || '832x1216';
+  document.getElementById('cfgSteps').value = g.steps || 28;
+  document.getElementById('cfgScale').value = g.scale || 5.0;
+  document.getElementById('cfgPromptRescale').value = g.promptGuidanceRescale || 0;
+  document.getElementById('cfgUcPreset').value = g.ucPreset || 0;
+  document.getElementById('cfgVarietyPlus').value = String(g.varietyPlus || false);
+  document.getElementById('cfgStyleReference').value = g.styleReference || '';
+  document.getElementById('cfgCharacterPrompt').value = g.characterPrompt || '';
+  document.getElementById('cfgNegativePrompt').value = g.negativePrompt || '';
+  document.getElementById('cfgCustomInstructions').value = (d.prompt && d.prompt.customInstructions) || '';
+
+  const v = d.vibe || {};
+  document.getElementById('cfgVibeAlwaysEnabled').checked = v.alwaysEnabled || false;
+  document.getElementById('cfgVibeSelectableEnabled').checked = v.selectableEnabled || false;
+
+  const dr = d.directorReference || {};
+  document.getElementById('cfgDrEnabled').checked = dr.enabled || false;
+  document.getElementById('cfgDrSelectableEnabled').checked = dr.selectableEnabled || false;
+}
+
+function renderConfigLists(d) {
+  // 预设
+  const pc = document.getElementById('cfgPresetsContainer');
+  pc.innerHTML = '';
+  (d.prompt?.presets || []).forEach((p, i) => {
+    pc.innerHTML += presetRow(p, i);
+  });
+
+  // Vibe always
+  const vc = document.getElementById('cfgVibeAlwaysContainer');
+  vc.innerHTML = '';
+  (d.vibe?.always || []).forEach((v, i) => {
+    vc.innerHTML += vibeRow(v, i, 'always');
+  });
+
+  // Vibe selectable
+  const vsc = document.getElementById('cfgVibeSelectableContainer');
+  vsc.innerHTML = '';
+  (d.vibe?.selectable || []).forEach((v, i) => {
+    vsc.innerHTML += vibeRow(v, i, 'selectable');
+  });
+
+  // Director refs
+  const drc = document.getElementById('cfgDrContainer');
+  drc.innerHTML = '';
+  (d.directorReference?.selectable || []).forEach((r, i) => {
+    drc.innerHTML += drRow(r, i);
+  });
+}
+
+function presetRow(p, i) {
+  return `<div class="card" data-cfg-type="preset" data-idx="${i}">
+    <div class="row">
+      <div><label>名称</label><input type="text" data-field="name" value="${esc(p.name)}" /></div>
+      <div><label>触发词</label><input type="text" data-field="trigger" value="${esc(p.trigger)}" /></div>
+    </div>
+    <div style="margin-top:8px"><label>内容</label><textarea data-field="content">${esc(p.content)}</textarea></div>
+    <div class="mini-actions"><button class="btn-sm btn-danger" data-del="preset">删除</button></div>
+  </div>`;
+}
+
+function vibeRow(v, i, kind) {
+  return `<div class="card" data-cfg-type="vibe-${kind}" data-idx="${i}">
+    <div class="row">
+      <div><label>文件名</label><input type="text" data-field="file" value="${esc(v.file)}" /></div>
+      <div><label>描述</label><input type="text" data-field="description" value="${esc(v.description)}" /></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div><label>IE (0-1)</label><input type="number" step="0.1" data-field="ie" value="${v.ie}" /></div>
+      <div><label>Strength (0-1)</label><input type="number" step="0.1" data-field="strength" value="${v.strength}" /></div>
+      <div><label class="toggle"><input type="checkbox" data-field="enabled" ${v.enabled?'checked':''} /> 启用</label></div>
+    </div>
+    <div class="mini-actions"><button class="btn-sm btn-danger" data-del="vibe-${kind}">删除</button></div>
+  </div>`;
+}
+
+function drRow(r, i) {
+  return `<div class="card" data-cfg-type="dr" data-idx="${i}">
+    <div class="row">
+      <div><label>文件名</label><input type="text" data-field="file" value="${esc(r.file)}" /></div>
+      <div><label>名称</label><input type="text" data-field="name" value="${esc(r.name)}" /></div>
+      <div><label>描述</label><input type="text" data-field="description" value="${esc(r.description)}" /></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div><label>类型</label><select data-field="type">
+        <option value="character" ${r.type==='character'?'selected':''}>角色（character）</option>
+        <option value="style" ${r.type==='style'?'selected':''}>风格（style）</option>
+        <option value="character&style" ${r.type==='character&style'?'selected':''}>两者（character&style）</option>
+      </select></div>
+      <div><label>Fidelity (0-1)</label><input type="number" step="0.1" data-field="fidelity" value="${r.fidelity}" /></div>
+      <div><label>Strength (0-1)</label><input type="number" step="0.1" data-field="strength" value="${r.strength}" /></div>
+      <div><label class="toggle"><input type="checkbox" data-field="enabled" ${r.enabled?'checked':''} /> 启用</label></div>
+    </div>
+    <div class="mini-actions"><button class="btn-sm btn-danger" data-del="dr">删除</button></div>
+  </div>`;
+}
+
+document.getElementById('addPresetPBtn').addEventListener('click', () => {
+  document.getElementById('cfgPresetsContainer').insertAdjacentHTML('beforeend', presetRow({name:'',trigger:'',content:''}, -1));
+});
+document.getElementById('addVibeAlwaysBtn').addEventListener('click', () => {
+  document.getElementById('cfgVibeAlwaysContainer').insertAdjacentHTML('beforeend', vibeRow({file:'',enabled:true,description:'',ie:1,strength:0.6}, -1, 'always'));
+});
+document.getElementById('addVibeSelectableBtn').addEventListener('click', () => {
+  document.getElementById('cfgVibeSelectableContainer').insertAdjacentHTML('beforeend', vibeRow({file:'',enabled:true,description:'',ie:1,strength:0.6}, -1, 'selectable'));
+});
+document.getElementById('addDrBtn').addEventListener('click', () => {
+  document.getElementById('cfgDrContainer').insertAdjacentHTML('beforeend', drRow({file:'',enabled:true,name:'',description:'',type:'character&style',fidelity:1,strength:1}, -1));
+});
+
+// 删除绑定
+document.addEventListener('click', (e) => {
+  if (e.target.dataset.del) {
+    e.target.closest('.card').remove();
+  }
+});
+
+document.getElementById('cfgSaveBtn').addEventListener('click', async () => {
+  try {
+    const overrides = collectConfig();
+    const r = await api('/api/config/save', { method:'POST', body: JSON.stringify({overrides}) });
+    cfgData = r;
+    fillConfigForm(r);
+    renderConfigLists(r);
+    document.getElementById('cfgStatus').textContent = '✅ 已保存';
+    setTimeout(() => document.getElementById('cfgStatus').textContent = '', 3000);
+  } catch (e) {
+    document.getElementById('cfgStatus').textContent = '❌ 保存失败: ' + e.message;
+  }
+});
+
+document.getElementById('cfgReloadBtn').addEventListener('click', loadConfig);
+
+function collectConfig() {
+  const g = {
+    model: v('cfgModel'), sampler: v('cfgSampler'), noiseSchedule: sel('cfgNoiseSchedule'),
+    resolution: sel('cfgResolution'), steps: intv('cfgSteps'), scale: floatv('cfgScale'),
+    promptGuidanceRescale: floatv('cfgPromptRescale'), ucPreset: intv('cfgUcPreset'),
+    varietyPlus: sel('cfgVarietyPlus')==='true', styleReference: v('cfgStyleReference'),
+    characterPrompt: v('cfgCharacterPrompt'), negativePrompt: v('cfgNegativePrompt'),
+  };
+  const presets = [...document.querySelectorAll('[data-cfg-type="preset"]')].map(c => {
+    return {
+      name: fieldVal(c, 'name'), trigger: fieldVal(c, 'trigger'), content: fieldVal(c, 'content'),
+    };
+  }).filter(p => p.name);
+  const always = [...document.querySelectorAll('[data-cfg-type="vibe-always"]')].map(c => {
+    return { file: fieldVal(c,'file'), enabled: fieldChk(c,'enabled'), description: fieldVal(c,'description'), ie: fieldFloat(c,'ie'), strength: fieldFloat(c,'strength') };
+  }).filter(v => v.file);
+  const selectable = [...document.querySelectorAll('[data-cfg-type="vibe-selectable"]')].map(c => {
+    return { file: fieldVal(c,'file'), enabled: fieldChk(c,'enabled'), description: fieldVal(c,'description'), ie: fieldFloat(c,'ie'), strength: fieldFloat(c,'strength') };
+  }).filter(v => v.file);
+  const drs = [...document.querySelectorAll('[data-cfg-type="dr"]')].map(c => {
+    return { file: fieldVal(c,'file'), enabled: fieldChk(c,'enabled'), name: fieldVal(c,'name'), description: fieldVal(c,'description'), type: fieldSel(c,'type'), fidelity: fieldFloat(c,'fidelity'), strength: fieldFloat(c,'strength') };
+  }).filter(r => r.file);
+  return {
+    generation: g,
+    prompt: { customInstructions: v('cfgCustomInstructions'), presets },
+    vibe: { alwaysEnabled: document.getElementById('cfgVibeAlwaysEnabled').checked, selectableEnabled: document.getElementById('cfgVibeSelectableEnabled').checked, always, selectable },
+    directorReference: { enabled: document.getElementById('cfgDrEnabled').checked, selectableEnabled: document.getElementById('cfgDrSelectableEnabled').checked, selectable: drs },
+  };
+}
+
+// 工具函数
+function v(id) { return document.getElementById(id).value.trim(); }
+function sel(id) { return document.getElementById(id).value; }
+function intv(id) { return parseInt(document.getElementById(id).value) || 0; }
+function floatv(id) { return parseFloat(document.getElementById(id).value) || 0; }
+function fieldVal(card, field) { const e = card.querySelector(`[data-field="${field}"]`); return e ? e.value.trim() : ''; }
+function fieldChk(card, field) { const e = card.querySelector(`[data-field="${field}"]`); return e ? e.checked : false; }
+function fieldFloat(card, field) { const e = card.querySelector(`[data-field="${field}"]`); return e ? parseFloat(e.value) || 0 : 0; }
+function fieldSel(card, field) { const e = card.querySelector(`[data-field="${field}"]`); return e ? e.value : ''; }
+
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 {
     "name": "image_generator_plugin-neo",
     "display_name": "NovelAI 绘图",
-    "version": "2.0.5",
+    "version": "2.0.6",
     "description": "基于 NovelAI 官方 API 的 AI 图片生成插件，支持文生图、图生图、Vibe 参考图等功能",
     "author": "言柒",
     "categories": ["tool"],
@@ -37,6 +37,11 @@
             "dependencies": []
         },
         {
+            "component_type": "router",
+            "component_name": "image_generator_webui",
+            "dependencies": []
+        },
+        {
             "component_type": "config",
             "component_name": "config",
             "dependencies": []
@@ -47,6 +52,6 @@
     "python_dependencies": [
         "aiohttp",
         "pillow>=12.1.0",
-        "holidays"
+        "httpx"
     ]
 }
