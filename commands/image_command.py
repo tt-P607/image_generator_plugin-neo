@@ -1,6 +1,7 @@
 """图片生成命令组件。
 
-包含文生图、图生图、Vibe 管理三个命令，使用 @cmd_route 实现路由。
+包含文生图、图生图、精密参考和 Vibe 管理命令，所有入口通过
+``@cmd_route`` 路由分发。
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from src.app.plugin_system.types import PermissionLevel
 
 from ..services.image_service import ImageGeneratorService
 from ..utils.image_utils import ImageUtils
+
+from ..image_source import extract_image_from_stream_id
 
 logger = get_logger("image_generator_plugin.command")
 
@@ -215,6 +218,36 @@ def _split_prompt(text: str) -> tuple[str, Optional[str]]:
     return text.strip(), None
 
 
+def _command_body(command: BaseCommand, names: tuple[str, ...]) -> str:
+    """从完整消息中提取当前命令名之后的原始正文。"""
+
+    message = command._message
+    if message is None:
+        return ""
+    source = message.processed_plain_text
+    if not source and isinstance(message.content, str):
+        source = message.content
+    if not source:
+        return ""
+    text = source.strip()
+    for name in names:
+        prefix = f"/{name}"
+        if text == prefix:
+            return ""
+        if text.startswith(f"{prefix} "):
+            return text[len(prefix) :].strip()
+    return ""
+
+
+def _user_scope(command: BaseCommand) -> str:
+    """返回命令状态使用的真实用户/流隔离键。"""
+
+    message = command._message
+    if message is not None and message.sender_id:
+        return f"{message.platform}:{message.sender_id}"
+    return f"stream:{command.stream_id}"
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  画幅/预设映射
 # ═════════════════════════════════════════════════════════════════════════
@@ -268,8 +301,8 @@ class ImageGeneratorCommand(BaseCommand):
       /画图 <提示词>                           - 中文别名
     """
 
-    command_name: str = "nai_image"
-    command_description: str = "NovelAI 文生图 - 根据提示词生成图片"
+    name: str = "nai_image"
+    description: str = "NovelAI 文生图 - 根据提示词生成图片"
     command_aliases: list[str] = ["画图", "生图"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
@@ -287,18 +320,22 @@ class ImageGeneratorCommand(BaseCommand):
         """获取服务实例。"""
         return getattr(self.plugin, "image_service", None)
 
-    async def execute(self, message_text: str) -> tuple[bool, str]:  # type: ignore[override]
-        """入口路由：/nai_image draw <提示词> 或直接 /nai_image <提示词>。"""
-        text = message_text.strip()
-        if not text:
-            await send_text(pick(MISSING_PROMPT_HINTS, "missing_prompt"), stream_id=self.stream_id)
-            return False, "缺少提示词"
-        parts = text.split(maxsplit=1)
-        if parts[0].lower() == "draw":
-            rest = parts[1] if len(parts) > 1 else ""
-        else:
-            rest = text  # 没有子命令，整段视为提示词
-        return await self._do_draw(rest)
+    @cmd_route()
+    async def handle_root(self) -> tuple[bool, str]:
+        """直接执行文生图命令。"""
+
+        return await self._do_draw(_command_body(self, ("nai_image", "画图", "生图")))
+
+    @cmd_route("draw")
+    async def handle_draw(self) -> tuple[bool, str]:
+        """执行 ``/nai_image draw`` 文生图子路由。"""
+
+        raw = _command_body(self, ("nai_image", "画图", "生图"))
+        if raw.lower() == "draw":
+            raw = ""
+        elif raw.lower().startswith("draw "):
+            raw = raw[5:].strip()
+        return await self._do_draw(raw)
 
     async def _do_draw(self, raw_text: str) -> tuple[bool, str]:
         """文生图核心处理：[画幅] <提示词> [|| 负面词] [--scale X] [--rescale X]"""
@@ -378,8 +415,7 @@ class ImageGeneratorCommand(BaseCommand):
                 stream_id=self.stream_id,
             )
 
-            # 简化 user_id：命令场景下无法直接获取
-            user_id = "command_user"
+            user_id = _user_scope(self)
             stream_id = self.stream_id
             message_id = self.message_id
 
@@ -433,10 +469,23 @@ class ImageGeneratorCommand(BaseCommand):
                         stream_id=stream_id,
                     )
 
-            get_task_manager().create_task(
+            task_info = get_task_manager().create_task(
                 _background_generate(),
                 name=f"cmd_draw_{user_id}",
+                metadata={
+                    "plugin": "image_generator_plugin-neo",
+                    "purpose": "command_draw",
+                    "stream_id": stream_id,
+                },
             )
+            register_task = getattr(self.plugin, "register_background_task", None)
+            discard_task = getattr(self.plugin, "discard_background_task", None)
+            if callable(register_task):
+                register_task(task_info.task_id)
+            if task_info.task is not None and callable(discard_task):
+                task_info.task.add_done_callback(
+                    lambda _task, task_id=task_info.task_id: discard_task(task_id)
+                )
             return True, "图片生成任务已提交"
 
         except Exception as e:
@@ -463,8 +512,8 @@ class ImageEditCommand(BaseCommand):
     需要引用一张图片。
     """
 
-    command_name: str = "nai_edit"
-    command_description: str = "NovelAI 图生图 - 基于引用图片进行编辑"
+    name: str = "nai_edit"
+    description: str = "NovelAI 图生图 - 基于引用图片进行编辑"
     command_aliases: list[str] = ["改图", "修图"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
@@ -482,15 +531,22 @@ class ImageEditCommand(BaseCommand):
         """获取服务实例。"""
         return getattr(self.plugin, "image_service", None)
 
-    async def execute(self, message_text: str) -> tuple[bool, str]:  # type: ignore[override]
-        """入口路由：/nai_edit edit <提示词> 或直接 /nai_edit <提示词>。"""
-        text = message_text.strip()
-        parts = text.split(maxsplit=1)
-        if parts and parts[0].lower() == "edit":
-            rest = parts[1] if len(parts) > 1 else ""
-        else:
-            rest = text
-        return await self._do_edit(rest)
+    @cmd_route()
+    async def handle_root(self) -> tuple[bool, str]:
+        """直接执行图生图命令。"""
+
+        return await self._do_edit(_command_body(self, ("nai_edit", "改图", "修图")))
+
+    @cmd_route("edit")
+    async def handle_edit(self) -> tuple[bool, str]:
+        """执行 ``/nai_edit edit`` 图生图子路由。"""
+
+        raw = _command_body(self, ("nai_edit", "改图", "修图"))
+        if raw.lower() == "edit":
+            raw = ""
+        elif raw.lower().startswith("edit "):
+            raw = raw[5:].strip()
+        return await self._do_edit(raw)
 
     async def _do_edit(self, raw_text: str) -> tuple[bool, str]:
         """图生图核心处理：<提示词> [强度]"""
@@ -506,8 +562,10 @@ class ImageEditCommand(BaseCommand):
             if not service:
                 raise RuntimeError("ImageGeneratorService 未初始化")
 
-            # TODO: 从消息引用中提取图片
-            image_b64 = await self._extract_image_from_reply()
+            image_b64 = await extract_image_from_stream_id(
+                self.stream_id,
+                self._message,
+            )
             if not image_b64:
                 await send_text("我需要一张图片才能帮你修改呀，记得引用图片哦", stream_id=self.stream_id)
                 return False, "未找到引用图片"
@@ -518,7 +576,7 @@ class ImageEditCommand(BaseCommand):
                 stream_id=self.stream_id,
             )
 
-            user_id = "command_user"
+            user_id = _user_scope(self)
 
             success, message, image_path = await service.generate_image(
                 prompt=prompt,
@@ -588,27 +646,6 @@ class ImageEditCommand(BaseCommand):
         prompt = " ".join(prompt_parts) or "masterpiece, best quality"
         return prompt, strength
 
-    async def _extract_image_from_reply(self) -> Optional[str]:
-        """从当前消息（含引用）中提取图片的 base64 编码。
-
-        框架在解析消息时已将引用消息内的图片解码为 base64 存入
-        message.content["media"]，这里直接读取即可。
-        """
-        if self._message is None:
-            logger.warning("_message 未注入，无法提取图片")
-            return None
-
-        content = self._message.content
-        if not isinstance(content, dict):
-            return None
-
-        for media in content.get("media", []):
-            if isinstance(media, dict) and media.get("type") == "image":
-                return media.get("data")
-
-        return None
-
-
 # ═════════════════════════════════════════════════════════════════════════
 #  精确参考命令
 # ═════════════════════════════════════════════════════════════════════════
@@ -654,8 +691,8 @@ class ImageRefCommand(BaseCommand):
       --strength X     参考强度 0.0~1.0（默认 1.0，越高风格越接近参考图）
     """
 
-    command_name: str = "nai_ref"
-    command_description: str = "精确参考图生图（引用图片+提示词）"
+    name: str = "nai_ref"
+    description: str = "精确参考图生图（引用图片+提示词）"
     command_aliases: list[str] = ["参考图"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
@@ -669,15 +706,22 @@ class ImageRefCommand(BaseCommand):
             return 1
         return 0
 
-    async def execute(self, message_text: str) -> tuple[bool, str]:
-        """入口路由：/nai_ref [ref] <提示词> 或直接 /参考图 <提示词>。"""
-        text = message_text.strip()
-        parts = text.split(maxsplit=1)
-        if parts and parts[0].lower() == "ref":
-            rest = parts[1] if len(parts) > 1 else ""
-        else:
-            rest = text
-        return await self._do_ref(rest)
+    @cmd_route()
+    async def handle_root(self) -> tuple[bool, str]:
+        """直接执行精密参考图命令。"""
+
+        return await self._do_ref(_command_body(self, ("nai_ref", "参考图")))
+
+    @cmd_route("ref")
+    async def handle_ref(self) -> tuple[bool, str]:
+        """执行 ``/nai_ref ref`` 子路由。"""
+
+        raw = _command_body(self, ("nai_ref", "参考图"))
+        if raw.lower() == "ref":
+            raw = ""
+        elif raw.lower().startswith("ref "):
+            raw = raw[4:].strip()
+        return await self._do_ref(raw)
 
     async def _do_ref(self, raw_text: str) -> tuple[bool, str]:
         """精确参考图核心处理。"""
@@ -689,7 +733,10 @@ class ImageRefCommand(BaseCommand):
             return False, "缺少参数"
 
         # 提取参考图
-        image_b64 = await self._extract_image_from_reply()
+        image_b64 = await extract_image_from_stream_id(
+            self.stream_id,
+            self._message,
+        )
         if not image_b64:
             await send_text(
                 "需要引用一张图片才能精确参考哦，回复一张图片再发命令试试",
@@ -721,7 +768,7 @@ class ImageRefCommand(BaseCommand):
 
             success, message, image_path = await service.generate_image(
                 prompt=prompt,
-                user_id="command_user",
+                user_id=_user_scope(self),
                 is_img2img=False,
                 negative_prompt=negative_prompt,
                 scale=scale,
@@ -768,18 +815,6 @@ class ImageRefCommand(BaseCommand):
     def _get_service(self) -> Optional[ImageGeneratorService]:
         """从插件实例获取图片生成服务。"""
         return getattr(self.plugin, "image_service", None)
-
-    async def _extract_image_from_reply(self) -> Optional[str]:
-        """从当前消息（含引用）中提取图片的 base64 编码。"""
-        if self._message is None:
-            return None
-        content = self._message.content
-        if not isinstance(content, dict):
-            return None
-        for media in content.get("media", []):
-            if isinstance(media, dict) and media.get("type") == "image":
-                return media.get("data")
-        return None
 
     def _parse_ref_flags(self, text: str) -> tuple[float, float, str, str]:
         """解析 --type/--参考类型、--fidelity、--strength 标志，返回 (fidelity, strength, ref_type, 剩余文本)。"""
@@ -835,8 +870,8 @@ class VibeManagementCommand(BaseCommand):
       /风格 列表/添加/状态/清空/账号 - 中文别名
     """
 
-    command_name: str = "nai_vibe"
-    command_description: str = "Vibe 参考图管理"
+    name: str = "nai_vibe"
+    description: str = "Vibe 参考图管理"
     command_aliases: list[str] = ["风格"]
     permission_level: PermissionLevel = PermissionLevel.OPERATOR
 
@@ -877,7 +912,7 @@ class VibeManagementCommand(BaseCommand):
             return False, "服务未初始化"
 
         file_name = filename
-        user_id = "command_user"
+        user_id = _user_scope(self)
 
         success, message = await service.load_vibe_from_file(user_id, file_name)
         await send_text(message, stream_id=self.stream_id)
@@ -890,7 +925,7 @@ class VibeManagementCommand(BaseCommand):
         if not service:
             return False, "服务未初始化"
 
-        user_id = "command_user"
+        user_id = _user_scope(self)
         message = service.get_vibe_status(user_id)
         await send_text(message, stream_id=self.stream_id)
         return True, message
@@ -902,7 +937,7 @@ class VibeManagementCommand(BaseCommand):
         if not service:
             return False, "服务未初始化"
 
-        user_id = "command_user"
+        user_id = _user_scope(self)
         message = service.clear_vibes(user_id)
         await send_text(message, stream_id=self.stream_id)
         return True, message

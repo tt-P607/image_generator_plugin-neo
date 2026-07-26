@@ -281,7 +281,8 @@ select option { background: var(--panel); }
 <script>
 const mbase = window.location.pathname.replace(/\/$/, '');
 async function api(url, opts = {}) {
-  const r = await fetch(mbase + url, { headers: {'Content-Type':'application/json'}, cache:'no-store', ...opts });
+  const headers = { 'Content-Type':'application/json', ...(opts.headers || {}) };
+  const r = await fetch(mbase + url, { ...opts, headers, cache:'no-store' });
   const t = await r.text();
   const d = t ? JSON.parse(t) : {};
   if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);

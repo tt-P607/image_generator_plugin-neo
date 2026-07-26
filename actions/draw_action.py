@@ -23,21 +23,11 @@ logger = get_logger("image_generator_plugin.draw_action")
 
 
 class DrawAction(BaseImageAction):
-    """AI 画图动作 — 将描述转换为 NovelAI 提示词并生成图片。
+    """AI 画图动作 — 将描述转换为 NovelAI 提示词并生成图片。"""
 
-    内置会话级图片记忆：每次出图后自动保存该聊天流的上次提示词，
-    下次激活时注入到 action_description，供模型保持服装与场景一致性。
-    """
-
-    # 会话级图片记忆：stream_id -> 上次出图的 content_description
-    _image_memory: dict[str, str] = {}
-
-    # 记忆块标记，用于定位和替换
-    _MEMORY_MARKER: str = "\n\n【上次出图 tags 参考】"
-
-    action_name: str = "draw_image"
+    name: str = "draw_image"
     associated_types: list[str] = ["image"]
-    action_description: str = (
+    base_action_description: str = (
         "**1. 基础结构**\n"
         "提示词必须为英文、半角逗号分隔的标签式结构。越靠前权重越高。\n"
         "推荐顺序：风格 → 人数/性别 → 角色身份 → 身体特征 → "
@@ -77,34 +67,17 @@ class DrawAction(BaseImageAction):
         "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
         "  - 单人物不要传 characters，留空即可\n"
         "  - 仅 V4 系列模型支持多人物和精确参考\n\n"
-        "**画幅**：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024"
+        "**画幅**：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024\n\n"
+        "**文件名规范**（output_filename，必填）：\n"
+        "  每次出图必须指定文件名，仅英文/数字/下划线，不含扩展名。\n"
+        "  命名建议：内容描述_序号，如 character_portrait_01、landscape_sunset_02。\n"
+        "  出图成功后返回值包含实际文件名，后续 inpaint_image / director_tool 可通过 image_filename 引用。"
     )
+    description: str = base_action_description
 
     primary_action: bool = True
     chat_type: ChatType = ChatType.ALL
 
-    async def go_activate(self) -> bool:
-        """激活时注入上次出图记忆到 action_description（按聊天流隔离）。"""
-        stream_id = getattr(self.chat_stream, "stream_id", "")
-        if not stream_id:
-            return True
-
-        last_tags = self._image_memory.get(stream_id)
-        if last_tags:
-            # 移除旧的记忆块（如果存在），再追加新的
-            base_desc = DrawAction.action_description
-            if self._MEMORY_MARKER in base_desc:
-                base_desc = base_desc.split(self._MEMORY_MARKER)[0].rstrip()
-            memory_block = (
-                f"{self._MEMORY_MARKER}\n{last_tags}\n"
-                "⚠️ 如果当前聊天流在连续叙事中，请尽可能保持场景和服装的一致性，"
-                "使用与上次相同的服装和场景 tags。如需换装或切换场景，"
-                "请在 content_description 中写明新的标签。"
-            )
-            type(self).action_description = base_desc + memory_block
-            logger.debug(f"已注入上次出图记忆 (stream={stream_id[:8]})")
-
-        return True
 
     async def execute(
         self,
@@ -113,6 +86,12 @@ class DrawAction(BaseImageAction):
             "图片内容的英文 NovelAI 标签，禁止中文。"
             "权重语法：n::tag::（提升）/ n::tag::（降低）。"
             "角色格式：character_name (source)；皮肤/来源精确拼写。",
+        ],
+        output_filename: Annotated[
+            str,
+            "必填。输出文件名（不含扩展名，仅英文/数字/下划线）。"
+            "图片以此文件名保存，后续 inpaint_image / director_tool 可通过此文件名引用。"
+            "例如：'character_portrait_01' 或 'landscape_sunset_02'。",
         ],
         resolution: Annotated[
             str,
@@ -202,14 +181,8 @@ class DrawAction(BaseImageAction):
             selected_vibe_names=vibe_names,
             character_prompts=character_prompts,
             reference_images=final_refs or None,
+            output_filename=output_filename.strip() or None,
         )
-
-        # 出图成功后保存 content_description 到会话级记忆
-        if result[0]:
-            stream_id = getattr(self.chat_stream, "stream_id", "")
-            if stream_id:
-                self._image_memory[stream_id] = content_description
-                logger.debug(f"已保存上次出图 tags 到会话记忆 (stream={stream_id[:8]})")
 
         return result
 

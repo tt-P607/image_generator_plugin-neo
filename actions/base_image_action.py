@@ -14,6 +14,7 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.send_api import send_image
 from src.app.plugin_system.base import BaseAction
 
+from ..image_source import extract_image_from_stream
 from ..utils.image_utils import ImageUtils
 
 if TYPE_CHECKING:
@@ -64,6 +65,50 @@ class BaseImageAction(BaseAction):
             logger.error("无法获取图片生成服务")
         return service
 
+    async def _extract_image_from_reply(self) -> Optional[str]:
+        """通过共享图片来源解析器获取当前流最近图片。"""
+
+        return await extract_image_from_stream(self.chat_stream)
+
+    def _load_image_by_filename(self, filename: str) -> Optional[str]:
+        """从 temp_images 目录按文件名加载 Bot 生成的图片。
+
+        支持带扩展名和不带扩展名的文件名查找。
+
+        Args:
+            filename: 图片文件名（如 "my_drawing.png" 或 "my_drawing"）
+
+        Returns:
+            图片 base64 字符串，未找到时返回 None
+        """
+        service = self.get_service()
+        if not service:
+            return None
+
+        import re
+
+        # 规范化文件名：只保留英文/数字/下划线/连字符/点
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-.]', '_', filename.strip())
+        if not safe_name:
+            return None
+
+        # 确保以 .png 结尾
+        if not safe_name.lower().endswith(".png"):
+            safe_name = safe_name + ".png"
+
+        # 在 temp_images 目录中查找
+        for search_dir in [service.temp_dir, service.command_images_dir]:
+            filepath = search_dir / safe_name
+            if filepath.exists():
+                from ..utils.image_utils import ImageUtils
+                success, _, img_b64 = ImageUtils.read_image_as_base64(str(filepath))
+                if success and img_b64:
+                    logger.info(f"通过文件名加载图片: {filepath}")
+                    return img_b64
+
+        logger.warning(f"文件名 '{filename}' 在 temp_images / command_images 中未找到")
+        return None
+
     async def generate_and_send_image(
         self,
         prompt: str,
@@ -75,6 +120,7 @@ class BaseImageAction(BaseAction):
         selected_vibe_names: Optional[list[str]] = None,
         character_prompts: Optional[list[dict[str, Any]]] = None,
         reference_images: Optional[list[dict[str, Any]]] = None,
+        output_filename: Optional[str] = None,
     ) -> tuple[bool, str]:
         """生成图片并发送（统一封装方法）。
 
@@ -87,6 +133,7 @@ class BaseImageAction(BaseAction):
             error_prefix: 错误消息前缀
             selected_vibe_names: LLM 选择的可选 Vibe 名称列表
             character_prompts: 多人物列表（仅 V4 系列模型支持），格式见 service.generate_image
+            output_filename: 自定义输出文件名（不含扩展名），设置后图片以此名保存并在返回值中包含文件名
 
         Returns:
             (是否成功, 消息)
@@ -121,11 +168,39 @@ class BaseImageAction(BaseAction):
                 )
 
                 if success and image_path:
+                    from pathlib import Path as _Path
+
+                    if output_filename:
+                        import re
+
+                        safe_stem = re.sub(
+                            r"[^a-zA-Z0-9_-]",
+                            "_",
+                            output_filename.strip(),
+                        ).strip("_")
+                        if safe_stem:
+                            old_path = _Path(image_path)
+                            new_path = old_path.parent / f"{safe_stem}.png"
+                            suffix = 2
+                            while new_path.exists():
+                                new_path = old_path.parent / f"{safe_stem}_{suffix}.png"
+                                suffix += 1
+                            try:
+                                old_path.rename(new_path)
+                                image_path = str(new_path)
+                                logger.info(f"图片已重命名为: {new_path}")
+                            except OSError as error:
+                                logger.warning(f"重命名图片失败，使用原始文件名: {error}")
+
                     success_result, image_msg = await self.read_and_send_image(
                         image_path,
                         success_message=success_message,
                         keep_file=True,
                     )
+                    # 始终在返回消息中包含实际文件名，供 LLM 后续引用
+                    if success_result:
+                        actual_filename = _Path(image_path).name
+                        return True, f"{success_message}（文件名: {actual_filename}）"
                     return success_result, image_msg
 
                 # Failed generate
@@ -144,10 +219,27 @@ class BaseImageAction(BaseAction):
                     await send_text(f"{error_prefix}: {err_msg}", stream_id=self.chat_stream.stream_id)
                 return False, f"{error_prefix}: {e}"
 
-        from src.kernel.concurrency.task_manager import get_task_manager
+        from src.kernel.concurrency import get_task_manager
         import asyncio
+
         tm = get_task_manager()
-        task_info = tm.create_task(_core_task(), name=f"draw_action_{user_id}")
+        task_info = tm.create_task(
+            _core_task(),
+            name=f"draw_action_{user_id}",
+            metadata={
+                "plugin": "image_generator_plugin-neo",
+                "purpose": "action_draw",
+                "stream_id": self.chat_stream.stream_id,
+            },
+        )
+        register_task = getattr(self.plugin, "register_background_task", None)
+        discard_task = getattr(self.plugin, "discard_background_task", None)
+        if callable(register_task):
+            register_task(task_info.task_id)
+        if task_info.task is not None and callable(discard_task):
+            task_info.task.add_done_callback(
+                lambda _task, task_id=task_info.task_id: discard_task(task_id)
+            )
 
         if task_info.task is None:
             return False, "后台生图任务创建失败"
@@ -235,5 +327,5 @@ class BaseImageAction(BaseAction):
             logger.warning(f"画幅 {resolution!r} 无效，使用方法默认值 {default}")
             return result
 
-        # 4. 终极兜底
+        # 最终使用稳定的方形画幅。
         return 1024, 1024

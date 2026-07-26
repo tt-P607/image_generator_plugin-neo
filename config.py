@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar, Literal
+
+from pydantic import model_validator
 
 from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
@@ -15,6 +17,7 @@ class VibeItemConfig(SectionBase):
     """单个 Vibe 配置项，always 和 selectable 列表通用。"""
 
     file: str = Field(
+        min_length=1,
         description="vibes/ 目录下的文件名（支持 .naiv4vibe / .naiv4vibebundle / .png / .jpg）",
     )
     enabled: bool = Field(
@@ -30,10 +33,14 @@ class VibeItemConfig(SectionBase):
     )
     ie: float = Field(
         default=1.0,
+        ge=0.0,
+        le=1.0,
         description="information_extracted：提取的信息量（0.0–1.0）",
     )
     strength: float = Field(
         default=0.6,
+        ge=0.0,
+        le=1.0,
         description="参考强度（0.0–1.0）",
     )
 
@@ -42,6 +49,7 @@ class DirectorReferenceItemConfig(SectionBase):
     """单个精密参考配置项。"""
 
     file: str = Field(
+        min_length=1,
         description="vibes/ 目录下的文件名（支持 .png / .jpg）",
     )
     enabled: bool = Field(
@@ -56,16 +64,20 @@ class DirectorReferenceItemConfig(SectionBase):
         default="",
         description="该参考图的场景/形态描述，告诉模型什么时候适合使用此参考。",
     )
-    type: str = Field(
+    type: Literal["character", "style", "character&style"] = Field(
         default="character&style",
         description="参考类型：character, style, 或 character&style",
     )
     fidelity: float = Field(
         default=1.0,
+        ge=0.0,
+        le=1.0,
         description="忠实度（0.0–1.0）",
     )
     strength: float = Field(
         default=1.0,
+        ge=0.0,
+        le=1.0,
         description="参考强度（0.0–1.0）",
     )
 
@@ -98,8 +110,38 @@ class PromptPresetConfig(SectionBase):
 class ImageGeneratorConfig(BaseConfig):
     """图片生成插件配置。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "NovelAI/IdleCloud 图片生成插件配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "NovelAI/IdleCloud 图片生成插件配置"
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_empty_vibe_items(cls, data: Any) -> Any:
+        """丢弃配置渲染器为 Vibe 空列表生成的空文件占位项。"""
+
+        if not isinstance(data, dict):
+            return data
+
+        vibe = data.get("vibe")
+        if not isinstance(vibe, dict):
+            return data
+
+        sanitized_data = dict(data)
+        sanitized_vibe = dict(vibe)
+        for field_name in ("always", "selectable"):
+            items = sanitized_vibe.get(field_name)
+            if not isinstance(items, list):
+                continue
+            sanitized_vibe[field_name] = [
+                item
+                for item in items
+                if not (
+                    isinstance(item, dict)
+                    and not str(item.get("file", "")).strip()
+                )
+            ]
+
+        sanitized_data["vibe"] = sanitized_vibe
+        return sanitized_data
 
     @config_section("plugin")
     class PluginSection(SectionBase):
@@ -122,12 +164,40 @@ class ImageGeneratorConfig(BaseConfig):
             default=True,
             description="是否启用 Command 组件（/画图 等命令）",
         )
+        inpaint_action_enabled: bool = Field(
+            default=True,
+            description="是否启用局部重绘 Action（inpaint_image）",
+        )
+        director_declutter_enabled: bool = Field(
+            default=True,
+            description="是否启用导演工具-去杂物（declutter：清理多余元素、遮挡物和文字）",
+        )
+        director_bg_removal_enabled: bool = Field(
+            default=False,
+            description="是否启用导演工具-精细抠图（bg-removal：去背景，输出透明 PNG，始终消耗 65~200 Anlas）",
+        )
+        director_lineart_enabled: bool = Field(
+            default=True,
+            description="是否启用导演工具-提取线稿（lineart）",
+        )
+        director_sketch_enabled: bool = Field(
+            default=True,
+            description="是否启用导演工具-转铅笔画（sketch：草图化）",
+        )
+        director_colorize_enabled: bool = Field(
+            default=True,
+            description="是否启用导演工具-线稿上色（colorize：需要 prompt 描述颜色方案）",
+        )
+        director_emotion_enabled: bool = Field(
+            default=True,
+            description="是否启用导演工具-改变表情（emotion：需要 prompt 描述表情）",
+        )
 
     @config_section("api")
     class ApiSection(SectionBase):
         """API 连接配置。"""
 
-        channel: str = Field(
+        channel: Literal["official", "gateway"] = Field(
             default="official",
             description=(
                 "生图渠道选择，决定插件使用哪套 API 协议。端点统一由 base_url 配置。\n\n"
@@ -148,10 +218,15 @@ class ImageGeneratorConfig(BaseConfig):
         )
         api_keys: list[str] = Field(
             default_factory=list,
+            max_length=32,
             description="API Keys 列表（支持多个，会自动轮换）。key 格式由所用渠道决定。",
+            input_type="password",
+            tag="security",
         )
         base_url: str = Field(
             default="https://image.novelai.net/ai/generate-image",
+            min_length=8,
+            pattern=r"^https?://[^\s]+$",
             description=(
                 "API 端点 URL，两种渠道均使用此字段。\n"
                 "official 渠道：填写完整的生图端点，如 https://image.novelai.net/ai/generate-image。\n"
@@ -161,11 +236,23 @@ class ImageGeneratorConfig(BaseConfig):
         )
         proxy: str = Field(
             default="",
+            pattern=r"^(?:|https?://[^\s]+)$",
             description="代理地址（如 http://127.0.0.1:7890），留空则不使用代理",
         )
         cooldown: int = Field(
             default=20,
+            ge=0,
+            le=600,
             description="请求冷却时间（秒）",
+        )
+        api_base_url: str = Field(
+            default="https://api.novelai.net",
+            min_length=8,
+            pattern=r"^https?://[^\s]+$",
+            description=(
+                "Official 渠道的 API 域名（用于 upscale 等需要 api.novelai.net 的端点）。"
+                "仅在 official 渠道下生效，gateway 渠道不使用此配置。"
+            ),
         )
 
     @config_section("generation")
@@ -176,20 +263,24 @@ class ImageGeneratorConfig(BaseConfig):
             default="nai-diffusion-4-5-curated",
             description="绘图模型",
         )
-        noise_schedule: str = Field(
+        noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
             description="噪声调度",
         )
-        resolution: str = Field(
+        resolution: Literal["1024x1024", "1216x832", "832x1216"] = Field(
             default="1024x1024",
             description="默认画布分辨率",
         )
         steps: int = Field(
             default=28,
+            ge=1,
+            le=50,
             description="迭代步数",
         )
         scale: float = Field(
             default=5.0,
+            ge=1.0,
+            le=10.0,
             description="引导比例",
         )
         sampler: str = Field(
@@ -198,10 +289,14 @@ class ImageGeneratorConfig(BaseConfig):
         )
         prompt_guidance_rescale: float = Field(
             default=0.0,
+            ge=0.0,
+            le=1.0,
             description="提示词引导重新缩放比例",
         )
         uc_preset: int = Field(
             default=0,
+            ge=0,
+            le=4,
             description=(
                 "Undesired Content 预设（官网 UC Preset 下拉）。"
                 "0=Strong（默认通用质量负面词），1=Light，2=Furry Focus，"
@@ -280,6 +375,20 @@ class ImageGeneratorConfig(BaseConfig):
             ),
         )
 
+        img2img_auto_downscale: bool = Field(
+            default=True,
+            description=(
+                "图生图时是否自动将原图等比缩放到 Opus 免费范围内（≤1024×1024 像素），"
+                "以避免消耗 Anlas。\n"
+                "开启（默认）：official 渠道图生图时，若原图尺寸超过 1M 像素，"
+                "自动使用 LANCZOS 算法等比缩放到不超过 1024×1024 的最大合法尺寸（对齐到 64px），"
+                "使 Opus 用户免费生成。\n"
+                "关闭：使用原图尺寸发送，超过 1M 像素时消耗 Anlas。\n"
+                "注意：Gateway 渠道的 /v1/images/img2img 端点自带自动缩放机制，"
+                "此配置项仅影响 official 渠道。"
+            ),
+        )
+
     @config_section("advanced")
     class AdvancedSection(SectionBase):
         """高级配置。"""
@@ -298,14 +407,20 @@ class ImageGeneratorConfig(BaseConfig):
         )
         max_vibes: int = Field(
             default=4,
+            ge=1,
+            le=16,
             description="最大 Vibe 叠加数量",
         )
         img2img_default_strength: float = Field(
             default=0.7,
+            ge=0.01,
+            le=1.0,
             description="图生图默认强度",
         )
         max_characters: int = Field(
             default=6,
+            ge=1,
+            le=6,
             description=(
                 "单次生图允许的最大角色数（NovelAI Web UI multi-character workspace 默认上限为 6，"
                 "超过该数量会被拒绝；仅 V4 系列模型支持，V3 调用多人物会直接报错）。"
@@ -357,10 +472,12 @@ class ImageGeneratorConfig(BaseConfig):
         )
         always: list[VibeItemConfig] = Field(
             default_factory=list,
+            max_length=32,
             description="始终注入的 Vibe 列表（always_enabled=true 时每次生图都使用）",
         )
         selectable: list[VibeItemConfig] = Field(
             default_factory=list,
+            max_length=64,
             description="LLM 可自选的 Vibe 列表（selectable_enabled=true 时生效，带场景描述帮助模型选择）",
         )
 
@@ -378,6 +495,7 @@ class ImageGeneratorConfig(BaseConfig):
         )
         selectable: list[DirectorReferenceItemConfig] = Field(
             default_factory=list,
+            max_length=64,
             description="LLM 可自选的精密参考列表",
         )
 
@@ -394,6 +512,9 @@ class ImageGeneratorConfig(BaseConfig):
         )
         route_path: str = Field(
             default="/plugins/image-generator",
+            pattern=r"^/[A-Za-z0-9/_-]*[A-Za-z0-9_-]$",
+            min_length=2,
+            max_length=128,
             description="WebUI 在主程序 HTTP 服务下的访问子路径",
         )
 

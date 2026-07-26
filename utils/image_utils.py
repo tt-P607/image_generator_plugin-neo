@@ -68,11 +68,11 @@ class ImageUtils:
 
     @staticmethod
     def strip_png_metadata(image_path: str) -> bytes:
-        """剥离 PNG 元数据并返回干净的字节数据。
+        """剥离 PNG 文本元数据并破坏 Alpha 通道中的隐写信息。
 
-        使用 PIL 重新保存图片到内存，去除所有 PNG 辅助块
-        （包括 NovelAI 嵌入的 Comment、Software、Generation Time 等）。
-        图片像素数据保持不变，视觉无差别。
+        重新保存时不携带 PNG 文本块。存在透明通道时保留 0/255 端点，
+        将中间透明度量化为 16 级，在尽量保持视觉透明度的同时破坏
+        Alpha 低位中可能携带的 NovelAI 隐写数据。
 
         Args:
             image_path: 图片文件路径
@@ -81,13 +81,19 @@ class ImageUtils:
             剥离元数据后的 PNG 字节数据
         """
         with Image.open(image_path) as img:
-            # 将图片强制转换为 RGB 模式，以完全丢弃可能包含元数据隐写的 Alpha 通道
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            # 清空 PIL 读取到的文本元数据，防止 save() 重新写入 tEXt/iTXt chunk
-            img.info.clear()
+            clean_image = img.convert("RGBA") if "A" in img.getbands() else img.convert("RGB")
+            if clean_image.mode == "RGBA":
+                red, green, blue, alpha = clean_image.split()
+                alpha = alpha.point(
+                    lambda value: value
+                    if value in (0, 255)
+                    else round(value / 17) * 17
+                )
+                clean_image = Image.merge("RGBA", (red, green, blue, alpha))
+            # 清空 PIL 读取到的文本元数据，防止重新写入 tEXt/iTXt chunk。
+            clean_image.info.clear()
             buf = io.BytesIO()
-            img.save(buf, format="PNG", optimize=False)
+            clean_image.save(buf, format="PNG", optimize=False)
             return buf.getvalue()
 
     @staticmethod
@@ -113,6 +119,77 @@ class ImageUtils:
             return False, f"不支持的图片格式: {ext}"
 
         return True, ""
+
+    @staticmethod
+    def save_b64_to_file(
+        b64_data: str,
+        save_dir: Path,
+        prefix: str = "image",
+    ) -> Optional[str]:
+        """将 Base64 图片保存到指定目录。"""
+
+        import uuid
+
+        try:
+            clean_b64 = b64_data.split(",", 1)[-1] if b64_data.startswith("data:") else b64_data
+            image_bytes = base64.b64decode(clean_b64)
+            if not image_bytes:
+                return None
+            save_dir.mkdir(parents=True, exist_ok=True)
+            file_path = save_dir / f"{prefix}_{uuid.uuid4()}.png"
+            file_path.write_bytes(image_bytes)
+            return str(file_path)
+        except Exception as error:
+            logger.error(f"保存 Base64 图片失败: {error}", exc_info=True)
+            return None
+
+    @staticmethod
+    def get_image_size_from_b64(b64_data: str) -> tuple[int, int]:
+        """读取 Base64 图片的宽高，失败时返回零尺寸。"""
+
+        try:
+            clean_b64 = b64_data.split(",", 1)[-1] if b64_data.startswith("data:") else b64_data
+            with Image.open(io.BytesIO(base64.b64decode(clean_b64))) as image:
+                return image.size
+        except Exception as error:
+            logger.warning(f"读取图片尺寸失败: {error}")
+            return 0, 0
+
+    @staticmethod
+    def downscale_image_b64(
+        b64_data: str,
+        max_pixels: int = 1_048_576,
+        align: int = 64,
+    ) -> tuple[str, int, int]:
+        """按宽高比缩小 Base64 图片，并将尺寸对齐到指定粒度。"""
+
+        try:
+            clean_b64 = b64_data.split(",", 1)[-1] if b64_data.startswith("data:") else b64_data
+            image_bytes = base64.b64decode(clean_b64)
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                width, height = image.size
+                if width * height <= max_pixels:
+                    return clean_b64, width, height
+                ratio = (max_pixels / (width * height)) ** 0.5
+                new_width = max(align, int(width * ratio // align) * align)
+                new_height = max(align, int(height * ratio // align) * align)
+                while new_width * new_height > max_pixels:
+                    if new_width >= new_height and new_width > align:
+                        new_width -= align
+                    elif new_height > align:
+                        new_height -= align
+                    else:
+                        break
+                resized = image.convert("RGB").resize(
+                    (new_width, new_height),
+                    Image.Resampling.LANCZOS,
+                )
+                output = io.BytesIO()
+                resized.save(output, format="PNG")
+            return base64.b64encode(output.getvalue()).decode("utf-8"), new_width, new_height
+        except Exception as error:
+            logger.error(f"图片缩放失败: {error}", exc_info=True)
+            return b64_data, 0, 0
 
     @staticmethod
     def cleanup_temp_file(file_path: str, *, keep_file: bool = True) -> None:

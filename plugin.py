@@ -6,10 +6,22 @@
 
 from __future__ import annotations
 
+from src.app.plugin_system.api.action_api import clear_schema_cache
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BasePlugin, register_plugin
+from src.kernel.concurrency import get_task_manager
 
+from .actions.base_image_action import BaseImageAction
+from .actions.director_tool_action import (
+    BgRemovalAction,
+    ColorizeAction,
+    DeclutterAction,
+    EmotionAction,
+    LineartAction,
+    SketchAction,
+)
 from .actions.draw_action import DrawAction
+from .actions.inpaint_action import InpaintAction
 from .commands.image_command import (
     ImageEditCommand,
     ImageGeneratorCommand,
@@ -32,7 +44,6 @@ class ImageGeneratorPlugin(BasePlugin):
 
     plugin_name: str = "image_generator_plugin-neo"
     plugin_description: str = "基于 NovelAI 官方 API 的 AI 图片生成插件"
-    plugin_version: str = "2.2.0"
 
     configs = [ImageGeneratorConfig]
 
@@ -44,6 +55,25 @@ class ImageGeneratorPlugin(BasePlugin):
         """
         super().__init__(config)
         self.image_service: ImageGeneratorService | None = None
+        self._background_task_ids: set[str] = set()
+
+    def register_background_task(self, task_id: str) -> None:
+        """登记插件拥有的后台任务。"""
+
+        self._background_task_ids.add(task_id)
+
+    def discard_background_task(self, task_id: str) -> None:
+        """移除已完成的后台任务登记。"""
+
+        self._background_task_ids.discard(task_id)
+
+    async def refresh_runtime_config(self, config: ImageGeneratorConfig) -> None:
+        """应用已校验配置并刷新共享 Service。"""
+
+        self.config = config
+        if self.image_service is not None:
+            await self.image_service.refresh_config()
+        self._inject_action_description(config)
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后的回调，初始化服务并注入动态信息。"""
@@ -66,11 +96,14 @@ class ImageGeneratorPlugin(BasePlugin):
         self._inject_action_description(cfg)
 
     def _inject_action_description(self, cfg: ImageGeneratorConfig) -> None:
-        """将配置中的动态信息注入到 Action description。
+        """从稳定基础文本幂等重建 Action description。
 
         Args:
             cfg: 插件配置实例
         """
+        DrawAction.description = DrawAction.base_action_description
+        BaseImageAction._preset_negative_prompt = ""
+
         # 1. 画风标签预设（默认拼接，LLM 可通过 no_style 跳过——可由 allow_skip_style 关闭）
         style_ref = cfg.generation.style_reference.strip()
         if style_ref:
@@ -86,18 +119,17 @@ class ImageGeneratorPlugin(BasePlugin):
                 )
             else:
                 style_block += "  ⚠️ 画风标签为强制注入，不可跳过。"
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip() + "\n\n" + style_block
+            DrawAction.description = (
+                DrawAction.description.rstrip() + "\n\n" + style_block
             )
             logger.debug("已将画风标签注入 Action description")
 
         # 2. 预设负面提示词
         preset_negative = cfg.generation.negative_prompt.strip()
         if preset_negative:
-            from .actions.base_image_action import BaseImageAction
             BaseImageAction._preset_negative_prompt = preset_negative
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + f"\n\n【已内置负面提示词（无需重复填写）】\n{preset_negative}"
             )
             logger.debug("已将预设负面提示词注入 Action description")
@@ -105,8 +137,8 @@ class ImageGeneratorPlugin(BasePlugin):
         # 3. 角色外观描述
         character_prompt = cfg.generation.character_prompt.strip()
         if character_prompt:
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + f"\n\n【角色外观描述（画自己时参考）】\n{character_prompt}"
             )
             logger.debug("已将角色外观描述注入 Action description")
@@ -120,8 +152,8 @@ class ImageGeneratorPlugin(BasePlugin):
                 preset_lines.append(
                     f"  - {preset.name}{trigger_hint}：{preset.content}"
                 )
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + "\n\n" + "\n".join(preset_lines)
             )
             logger.debug(f"已将 {len(visible_presets)} 条预设注入 Action description（跳过 {len(cfg.prompt.presets) - len(visible_presets)} 条空内容预设）")
@@ -129,24 +161,25 @@ class ImageGeneratorPlugin(BasePlugin):
         # 5. 自定义提示词指引（自由文本）
         custom = cfg.prompt.custom_instructions.strip()
         if custom:
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + f"\n\n【自定义指引】\n{custom}"
             )
             logger.debug("已将自定义提示词指引注入 Action description")
 
         # 6. 可选 Vibe 列表（带场景描述）
         if cfg.vibe.selectable_enabled and cfg.vibe.selectable:
-            from pathlib import Path as _Path
+            from pathlib import Path
+
             vibe_lines = ["【可选 Vibe 画风列表（通过 selected_vibes 参数选择，可多选，逗号分隔）】"]
             for item in cfg.vibe.selectable:
-                name = _Path(item.file).stem
+                vibe_name = Path(item.file).stem
                 if item.description:
-                    vibe_lines.append(f"  - {name}：{item.description}")
+                    vibe_lines.append(f"  - {vibe_name}：{item.description}")
                 else:
-                    vibe_lines.append(f"  - {name}")
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+                    vibe_lines.append(f"  - {vibe_name}")
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + "\n\n" + "\n".join(vibe_lines)
             )
             logger.debug(f"已将 {len(cfg.vibe.selectable)} 个可选 Vibe 注入 Action description")
@@ -157,26 +190,36 @@ class ImageGeneratorPlugin(BasePlugin):
             and cfg.director_reference.selectable_enabled
             and cfg.director_reference.selectable
         ):
-            from pathlib import Path as _Path
+            from pathlib import Path
+
             ref_lines = ["【可用精密参考列表（通过 selected_director_refs 参数选择，可多选，逗号分隔）】"]
             for item in cfg.director_reference.selectable:
-                if not getattr(item, "enabled", True):
+                if not item.enabled:
                     continue
-                name = item.name or _Path(item.file).stem
+                ref_name = item.name or Path(item.file).stem
                 if item.description:
-                    ref_lines.append(f"  - {name}：{item.description}")
+                    ref_lines.append(f"  - {ref_name}：{item.description}")
                 else:
-                    ref_lines.append(f"  - {name}")
-            DrawAction.action_description = (
-                DrawAction.action_description.rstrip()
+                    ref_lines.append(f"  - {ref_name}")
+            DrawAction.description = (
+                DrawAction.description.rstrip()
                 + "\n\n" + "\n".join(ref_lines)
             )
             logger.debug(f"已将 {len(cfg.director_reference.selectable)} 个精密参考注入 Action description")
 
+        clear_schema_cache("image_generator_plugin-neo:action:draw_image")
+
     async def on_plugin_unloaded(self) -> None:
-        """插件卸载前的回调，清理资源。"""
-        if self.image_service:
+        """取消插件任务并清理共享 Service。"""
+
+        task_manager = get_task_manager()
+        for task_id in tuple(self._background_task_ids):
+            task_manager.cancel_task(task_id)
+        self._background_task_ids.clear()
+
+        if self.image_service is not None:
             await self.image_service.cleanup()
+            self.image_service = None
             logger.info("ImageGeneratorService 已清理")
 
     def get_components(self) -> list[type]:
@@ -193,6 +236,21 @@ class ImageGeneratorPlugin(BasePlugin):
         # Action 组件（执行实际生图）
         if cfg.components.action_enabled:
             components.append(DrawAction)
+            if cfg.components.inpaint_action_enabled:
+                components.append(InpaintAction)
+            # 导演工具：按各自配置开关分别注册独立 Action
+            if cfg.components.director_declutter_enabled:
+                components.append(DeclutterAction)
+            if cfg.components.director_bg_removal_enabled:
+                components.append(BgRemovalAction)
+            if cfg.components.director_lineart_enabled:
+                components.append(LineartAction)
+            if cfg.components.director_sketch_enabled:
+                components.append(SketchAction)
+            if cfg.components.director_colorize_enabled:
+                components.append(ColorizeAction)
+            if cfg.components.director_emotion_enabled:
+                components.append(EmotionAction)
 
         # Command 组件
         if cfg.components.command_enabled:

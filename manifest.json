@@ -1,11 +1,18 @@
 {
     "name": "image_generator_plugin-neo",
     "display_name": "NovelAI 绘图",
-    "version": "2.0.6",
-    "description": "基于 NovelAI 官方 API 的 AI 图片生成插件，支持文生图、图生图、Vibe 参考图等功能",
+    "version": "2.0.7",
+    "description": "支持 NovelAI 官方 API 与 OpenAI 兼容 Gateway 的图片生成、编辑、Vibe 和 Director 工具插件",
     "author": "言柒",
-    "categories": ["tool"],
-    "tags": ["image", "generator", "novelai", "ai"],
+    "categories": [
+        "tool"
+    ],
+    "tags": [
+        "image",
+        "generator",
+        "novelai",
+        "ai"
+    ],
     "dependencies": {
         "plugins": [],
         "components": []
@@ -17,6 +24,41 @@
             "dependencies": []
         },
         {
+            "component_type": "action",
+            "component_name": "inpaint_image",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_declutter",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_bg_removal",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_lineart",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_sketch",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_colorize",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "director_emotion",
+            "dependencies": []
+        },
+        {
             "component_type": "command",
             "component_name": "nai_image",
             "dependencies": []
@@ -24,6 +66,11 @@
         {
             "component_type": "command",
             "component_name": "nai_edit",
+            "dependencies": []
+        },
+        {
+            "component_type": "command",
+            "component_name": "nai_ref",
             "dependencies": []
         },
         {
@@ -48,10 +95,10 @@
         }
     ],
     "entry_point": "plugin.py",
-    "min_core_version": "1.0.0",
+    "api_version": {"action_api": "1.0.0", "log_api": "1.0.0", "media_api": "1.0.0", "send_api": "1.0.0", "stream_api": "1.0.0"},
     "python_dependencies": [
         "aiohttp",
-        "pillow>=12.1.0",
-        "httpx"
+        "numpy",
+        "pillow>=12.1.0"
     ]
 }
