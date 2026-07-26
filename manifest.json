@@ -1,7 +1,7 @@
 {
     "name": "image_generator_plugin-neo",
     "display_name": "NovelAI 绘图",
-    "version": "2.0.7",
+    "version": "2.1.0",
     "description": "支持 NovelAI 官方 API 与 OpenAI 兼容 Gateway 的图片生成、编辑、Vibe 和 Director 工具插件",
     "author": "言柒",
     "categories": [
@@ -21,84 +21,105 @@
         {
             "component_type": "action",
             "component_name": "draw_image",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "inpaint_image",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_declutter",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_bg_removal",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_lineart",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_sketch",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_colorize",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "action",
             "component_name": "director_emotion",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "command",
             "component_name": "nai_image",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "command",
             "component_name": "nai_edit",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "command",
             "component_name": "nai_ref",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "command",
             "component_name": "nai_vibe",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "service",
             "component_name": "image_generator",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "router",
             "component_name": "image_generator_webui",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         },
         {
             "component_type": "config",
             "component_name": "config",
-            "dependencies": []
+            "dependencies": [],
+            "enabled": true
         }
     ],
     "entry_point": "plugin.py",
-    "api_version": {"action_api": "1.0.0", "log_api": "1.0.0", "media_api": "1.0.0", "send_api": "1.0.0", "stream_api": "1.0.0"},
+    "api_version": {
+        "action_api": "1.0.0",
+        "log_api": "1.0.0",
+        "media_api": "1.0.0",
+        "send_api": "1.0.0",
+        "stream_api": "1.0.0"
+    },
     "python_dependencies": [
         "aiohttp",
-        "numpy",
         "pillow>=12.1.0"
-    ]
+    ],
+    "dependencies_required": true
 }

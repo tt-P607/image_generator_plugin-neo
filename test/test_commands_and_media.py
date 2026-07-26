@@ -1,0 +1,166 @@
+"""命令解析、图片处理与描述构建测试。"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+from PIL import Image, PngImagePlugin
+
+from image_generator_plugin_neo.commands import parsing
+from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
+from image_generator_plugin_neo.descriptions import build_draw_description
+from image_generator_plugin_neo.engine import storage
+from image_generator_plugin_neo.media import image_ops
+
+
+def encode_png(image: Image.Image) -> str:
+    """把 Pillow 图片编码为 base64 PNG。"""
+
+    import base64
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_extract_scale_flags_keeps_zero_value() -> None:
+    """验证 --rescale 0 不会被当成未设置。"""
+
+    flags = parsing.extract_scale_flags("1girl --scale 7 --rescale 0")
+    assert flags.scale == 7.0
+    assert flags.cfg_rescale == 0.0
+    assert flags.remainder == "1girl"
+
+
+def test_split_prompt_supports_fullwidth_colon() -> None:
+    """验证正负面切分兼容全角冒号。"""
+
+    assert parsing.split_prompt("正面：1girl 负面：chibi") == ("1girl", "chibi")
+    assert parsing.split_prompt("1girl, pink hair") == ("1girl, pink hair", None)
+
+
+def test_parse_size_token_handles_aliases_and_literals() -> None:
+    """验证画幅词元同时支持中文别名与显式尺寸。"""
+
+    assert parsing.parse_size_token("竖图") == (832, 1216)
+    assert parsing.parse_size_token("1216×832") == (1216, 832)
+    assert parsing.parse_size_token("1girl") is None
+
+
+def test_parse_edit_args_extracts_strength_only_in_range() -> None:
+    """验证只有落在合法区间的数字才会被视作重绘强度。"""
+
+    assert parsing.parse_edit_args(["1girl", "0.5"]) == ("1girl", 0.5)
+    assert parsing.parse_edit_args(["1girl", "5"]) == ("1girl 5", None)
+    assert parsing.parse_edit_args([]) == (parsing.DEFAULT_EDIT_PROMPT, None)
+
+
+def test_extract_reference_flags_clamps_values() -> None:
+    """验证参考参数会被夹紧到 0~1 且支持中文别名。"""
+
+    flags = parsing.extract_reference_flags(
+        "1girl --参考类型 风格 --fidelity 2.0 --strength -1"
+    )
+    assert flags.ref_type == "style"
+    assert flags.fidelity == 1.0
+    assert flags.strength == 0.0
+    assert flags.remainder == "1girl"
+
+
+def test_strip_metadata_quantizes_alpha_and_removes_text(tmp_path: Path) -> None:
+    """验证元数据剥离会量化透明度并移除 PNG 文本块。"""
+
+    source = tmp_path / "source.png"
+    image = Image.new("RGBA", (4, 1))
+    image.putdata(
+        [(255, 0, 0, 0), (255, 0, 0, 1), (255, 0, 0, 128), (255, 0, 0, 255)]
+    )
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Comment", "hidden prompt")
+    image.save(source, pnginfo=metadata)
+
+    stripped = image_ops.strip_png_metadata(source.read_bytes())
+    with Image.open(io.BytesIO(stripped)) as output:
+        alpha_channel = output.getchannel("A")
+        alpha = [alpha_channel.getpixel((x, 0)) for x in range(output.width)]
+        assert alpha == [0, 0, 136, 255]
+        assert "Comment" not in output.info
+
+
+def test_downscale_keeps_small_image_untouched() -> None:
+    """验证未超过免费像素上限的图片不会被缩放。"""
+
+    encoded = encode_png(Image.new("RGB", (512, 512), (10, 20, 30)))
+    result, width, height = image_ops.downscale_to_free_tier(encoded)
+    assert (width, height) == (512, 512)
+    assert result == encoded
+
+
+def test_downscale_aligns_to_64_within_budget() -> None:
+    """验证超限图片缩放后对齐 64 像素且总像素不超上限。"""
+
+    encoded = encode_png(Image.new("RGB", (2048, 2048), (0, 0, 0)))
+    _, width, height = image_ops.downscale_to_free_tier(encoded)
+    assert width % 64 == 0 and height % 64 == 0
+    assert width * height <= image_ops.FREE_TIER_MAX_PIXELS
+
+
+def test_director_reference_is_padded_to_required_size() -> None:
+    """验证精密参考图会被填充到 API 要求的 1024x1536。"""
+
+    encoded = encode_png(Image.new("RGB", (800, 400), (255, 255, 255)))
+    fitted = image_ops.fit_for_director_reference(encoded)
+    assert image_ops.read_image_size(fitted) == image_ops.DIRECTOR_REF_SIZE
+
+
+def test_rect_mask_marks_only_selected_region() -> None:
+    """验证矩形遮罩仅在指定区域为白色不透明。"""
+
+    import base64
+
+    mask_b64 = image_ops.build_rect_mask(100, 100, 0.5, 0.0, 0.5, 1.0)
+    with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as mask:
+        assert mask.getpixel((10, 50)) == (0, 0, 0, 255)
+        assert mask.getpixel((75, 50)) == (255, 255, 255, 255)
+
+
+def test_rename_with_stem_avoids_overwriting(tmp_path: Path) -> None:
+    """验证重名时自动追加序号，不覆盖已有文件。"""
+
+    first = tmp_path / "a.png"
+    first.write_bytes(b"first")
+    existing = tmp_path / "portrait.png"
+    existing.write_bytes(b"existing")
+
+    renamed = storage.rename_with_stem(first, "portrait")
+    assert renamed.name == "portrait_2.png"
+    assert existing.read_bytes() == b"existing"
+
+
+def test_draw_description_rebuilds_without_accumulating() -> None:
+    """验证描述每次都从基础文本重建，配置刷新不会叠加历史内容。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.style_reference = "anime style"
+    config.prompt.presets = [
+        PromptPresetConfig(name="自拍模式", trigger="画自己时", content="使用角色标签")
+    ]
+
+    first = build_draw_description(config)
+    second = build_draw_description(config)
+    assert first == second
+    assert first.count("anime style") == 1
+    assert "自拍模式" in first
+
+    config.generation.style_reference = ""
+    assert "anime style" not in build_draw_description(config)
+
+
+def test_draw_description_hides_skip_hint_when_forced() -> None:
+    """验证禁止跳过画风时展示强制注入提示。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.style_reference = "anime style"
+    config.generation.allow_skip_style = False
+    assert "不可跳过" in build_draw_description(config)

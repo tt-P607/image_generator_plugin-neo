@@ -1,51 +1,65 @@
 """NovelAI 图片生成插件。
 
-支持文生图、图生图、Vibe 参考图等功能。
-使用任务队列串行化所有生图请求，防止 429 封号。
+支持文生图、图生图、局部重绘、Vibe 参考与导演工具，
+兼容 NovelAI 官方 API 与 OpenAI 协议的 Gateway 中转服务。
 """
 
 from __future__ import annotations
+
+from typing import cast
 
 from src.app.plugin_system.api.action_api import clear_schema_cache
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BasePlugin, register_plugin
 from src.kernel.concurrency import get_task_manager
 
-from .actions.base_image_action import BaseImageAction
-from .actions.director_tool_action import (
+from .actions import (
     BgRemovalAction,
     ColorizeAction,
     DeclutterAction,
+    DrawAction,
     EmotionAction,
+    InpaintAction,
     LineartAction,
     SketchAction,
 )
-from .actions.draw_action import DrawAction
-from .actions.inpaint_action import InpaintAction
-from .commands.image_command import (
+from .commands import (
     ImageEditCommand,
     ImageGeneratorCommand,
-    ImageRefCommand,
+    ImageReferenceCommand,
     VibeManagementCommand,
 )
 from .config import ImageGeneratorConfig
-from .router import WebUIRouter
+from .descriptions import build_draw_description
+from .engine import ImageEngine
 from .services.image_service import ImageGeneratorService
+from .webui import WebUIRouter
 
 logger = get_logger("image_generator_plugin")
+
+PLUGIN_NAME = "image_generator_plugin-neo"
+DRAW_ACTION_SIGNATURE = f"{PLUGIN_NAME}:action:draw_image"
+
+DIRECTOR_ACTIONS: tuple[tuple[str, type], ...] = (
+    ("director_declutter_enabled", DeclutterAction),
+    ("director_bg_removal_enabled", BgRemovalAction),
+    ("director_lineart_enabled", LineartAction),
+    ("director_sketch_enabled", SketchAction),
+    ("director_colorize_enabled", ColorizeAction),
+    ("director_emotion_enabled", EmotionAction),
+)
 
 
 @register_plugin
 class ImageGeneratorPlugin(BasePlugin):
-    """NovelAI 图片生成插件。
+    """NovelAI 图片生成插件。"""
 
-    支持文生图、图生图、Vibe 参考图等功能。
-    """
-
-    plugin_name: str = "image_generator_plugin-neo"
+    plugin_name: str = PLUGIN_NAME
     plugin_description: str = "基于 NovelAI 官方 API 的 AI 图片生成插件"
+    plugin_version: str = "2.1.0"
 
-    configs = [ImageGeneratorConfig]
+    configs: list[type] = [ImageGeneratorConfig]
+    dependent_components: list[str] = []
 
     def __init__(self, config: ImageGeneratorConfig | None = None) -> None:
         """初始化插件。
@@ -54,216 +68,117 @@ class ImageGeneratorPlugin(BasePlugin):
             config: 插件配置实例
         """
         super().__init__(config)
-        self.image_service: ImageGeneratorService | None = None
+        self.engine: ImageEngine | None = None
         self._background_task_ids: set[str] = set()
 
-    def register_background_task(self, task_id: str) -> None:
-        """登记插件拥有的后台任务。"""
+    @property
+    def image_config(self) -> ImageGeneratorConfig:
+        """当前插件配置。
 
+        Returns:
+            配置实例；框架未注入时返回一份默认配置
+        """
+        config = self.config
+        if isinstance(config, ImageGeneratorConfig):
+            return config
+        return ImageGeneratorConfig()
+
+    def register_background_task(self, task_id: str) -> None:
+        """登记插件拥有的后台任务。
+
+        Args:
+            task_id: 任务 ID
+        """
         self._background_task_ids.add(task_id)
 
     def discard_background_task(self, task_id: str) -> None:
-        """移除已完成的后台任务登记。"""
+        """移除已完成的后台任务登记。
 
+        Args:
+            task_id: 任务 ID
+        """
         self._background_task_ids.discard(task_id)
 
-    async def refresh_runtime_config(self, config: ImageGeneratorConfig) -> None:
-        """应用已校验配置并刷新共享 Service。"""
-
-        self.config = config
-        if self.image_service is not None:
-            await self.image_service.refresh_config()
-        self._inject_action_description(config)
-
     async def on_plugin_loaded(self) -> None:
-        """插件加载完成后的回调，初始化服务并注入动态信息。"""
-        cfg = self.config
-        if not isinstance(cfg, ImageGeneratorConfig) or not cfg.plugin.enabled:
+        """启动引擎并注入画图 Action 描述。"""
+
+        config = self.image_config
+        if not config.plugin.enabled:
             logger.info("ImageGeneratorPlugin 已在配置中禁用")
             return
 
-        try:
-            logger.info("初始化 ImageGeneratorPlugin...")
-            self.image_service = ImageGeneratorService(self)
-            await self.image_service.initialize()
-
-            logger.info("ImageGeneratorService 已初始化")
-        except Exception as e:
-            logger.error(f"ImageGeneratorPlugin 初始化失败: {e}", exc_info=True)
-            raise
-
-        # === 注入动态信息到 Action 的 description ===
-        self._inject_action_description(cfg)
-
-    def _inject_action_description(self, cfg: ImageGeneratorConfig) -> None:
-        """从稳定基础文本幂等重建 Action description。
-
-        Args:
-            cfg: 插件配置实例
-        """
-        DrawAction.description = DrawAction.base_action_description
-        BaseImageAction._preset_negative_prompt = ""
-
-        # 1. 画风标签预设（默认拼接，LLM 可通过 no_style 跳过——可由 allow_skip_style 关闭）
-        style_ref = cfg.generation.style_reference.strip()
-        if style_ref:
-            allow_skip = cfg.generation.allow_skip_style
-            style_block = (
-                "【默认画风标签（系统自动拼接到提示词最前面）】\n"
-                f"  {style_ref}\n"
-            )
-            if allow_skip:
-                style_block += (
-                    "  ⚠️ 如果当前场景不适合此画风（如特殊形态、表情包、纯风景等），"
-                    "请在 content_description 中加入 `no_style` 来跳过画风注入。"
-                )
-            else:
-                style_block += "  ⚠️ 画风标签为强制注入，不可跳过。"
-            DrawAction.description = (
-                DrawAction.description.rstrip() + "\n\n" + style_block
-            )
-            logger.debug("已将画风标签注入 Action description")
-
-        # 2. 预设负面提示词
-        preset_negative = cfg.generation.negative_prompt.strip()
-        if preset_negative:
-            BaseImageAction._preset_negative_prompt = preset_negative
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + f"\n\n【已内置负面提示词（无需重复填写）】\n{preset_negative}"
-            )
-            logger.debug("已将预设负面提示词注入 Action description")
-
-        # 3. 角色外观描述
-        character_prompt = cfg.generation.character_prompt.strip()
-        if character_prompt:
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + f"\n\n【角色外观描述（画自己时参考）】\n{character_prompt}"
-            )
-            logger.debug("已将角色外观描述注入 Action description")
-
-        # 4. 结构化预设列表（跳过 content 为空的纯参考图预设，它们只是内部触发机制）
-        visible_presets = [p for p in cfg.prompt.presets if p.content.strip()]
-        if visible_presets:
-            preset_lines = ["【预设场景指令】"]
-            for preset in visible_presets:
-                trigger_hint = f"（{preset.trigger}）" if preset.trigger else ""
-                preset_lines.append(
-                    f"  - {preset.name}{trigger_hint}：{preset.content}"
-                )
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + "\n\n" + "\n".join(preset_lines)
-            )
-            logger.debug(f"已将 {len(visible_presets)} 条预设注入 Action description（跳过 {len(cfg.prompt.presets) - len(visible_presets)} 条空内容预设）")
-
-        # 5. 自定义提示词指引（自由文本）
-        custom = cfg.prompt.custom_instructions.strip()
-        if custom:
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + f"\n\n【自定义指引】\n{custom}"
-            )
-            logger.debug("已将自定义提示词指引注入 Action description")
-
-        # 6. 可选 Vibe 列表（带场景描述）
-        if cfg.vibe.selectable_enabled and cfg.vibe.selectable:
-            from pathlib import Path
-
-            vibe_lines = ["【可选 Vibe 画风列表（通过 selected_vibes 参数选择，可多选，逗号分隔）】"]
-            for item in cfg.vibe.selectable:
-                vibe_name = Path(item.file).stem
-                if item.description:
-                    vibe_lines.append(f"  - {vibe_name}：{item.description}")
-                else:
-                    vibe_lines.append(f"  - {vibe_name}")
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + "\n\n" + "\n".join(vibe_lines)
-            )
-            logger.debug(f"已将 {len(cfg.vibe.selectable)} 个可选 Vibe 注入 Action description")
-
-        # 7. 可选精密参考列表（带场景描述）
-        if (
-            cfg.director_reference.enabled
-            and cfg.director_reference.selectable_enabled
-            and cfg.director_reference.selectable
-        ):
-            from pathlib import Path
-
-            ref_lines = ["【可用精密参考列表（通过 selected_director_refs 参数选择，可多选，逗号分隔）】"]
-            for item in cfg.director_reference.selectable:
-                if not item.enabled:
-                    continue
-                ref_name = item.name or Path(item.file).stem
-                if item.description:
-                    ref_lines.append(f"  - {ref_name}：{item.description}")
-                else:
-                    ref_lines.append(f"  - {ref_name}")
-            DrawAction.description = (
-                DrawAction.description.rstrip()
-                + "\n\n" + "\n".join(ref_lines)
-            )
-            logger.debug(f"已将 {len(cfg.director_reference.selectable)} 个精密参考注入 Action description")
-
-        clear_schema_cache("image_generator_plugin-neo:action:draw_image")
+        engine = ImageEngine(config)
+        await engine.start()
+        self.engine = engine
+        self._refresh_draw_description(config)
+        logger.info("ImageGeneratorPlugin 初始化完成")
 
     async def on_plugin_unloaded(self) -> None:
-        """取消插件任务并清理共享 Service。"""
+        """取消后台任务并释放引擎资源。"""
 
         task_manager = get_task_manager()
         for task_id in tuple(self._background_task_ids):
             task_manager.cancel_task(task_id)
         self._background_task_ids.clear()
 
-        if self.image_service is not None:
-            await self.image_service.cleanup()
-            self.image_service = None
-            logger.info("ImageGeneratorService 已清理")
+        if self.engine is not None:
+            await self.engine.close()
+            self.engine = None
+
+    async def apply_config(self, config: ImageGeneratorConfig) -> None:
+        """应用新配置并刷新引擎与 Action 描述。
+
+        Args:
+            config: 已校验的新配置实例
+        """
+        self.config = cast(ImageGeneratorConfig, config)
+        if self.engine is not None:
+            await self.engine.reload(config)
+        self._refresh_draw_description(config)
+
+    def _refresh_draw_description(self, config: ImageGeneratorConfig) -> None:
+        """按配置重建画图 Action 的描述并让 schema 缓存失效。
+
+        Args:
+            config: 当前配置实例
+        """
+        DrawAction.description = build_draw_description(config)
+        clear_schema_cache(DRAW_ACTION_SIGNATURE)
+        logger.debug("画图 Action 描述已刷新")
 
     def get_components(self) -> list[type]:
-        """获取插件内所有组件类。
+        """按配置开关返回启用的组件类。
 
-        根据配置决定是否启用各组件。
+        Returns:
+            组件类列表
         """
-        cfg = self.config
-        if not isinstance(cfg, ImageGeneratorConfig) or not cfg.plugin.enabled:
+        config = self.image_config
+        if not config.plugin.enabled:
             return []
 
-        components: list[type] = []
+        components: list[type] = [ImageGeneratorService]
 
-        # Action 组件（执行实际生图）
-        if cfg.components.action_enabled:
+        if config.components.action_enabled:
             components.append(DrawAction)
-            if cfg.components.inpaint_action_enabled:
+            if config.components.inpaint_action_enabled:
                 components.append(InpaintAction)
-            # 导演工具：按各自配置开关分别注册独立 Action
-            if cfg.components.director_declutter_enabled:
-                components.append(DeclutterAction)
-            if cfg.components.director_bg_removal_enabled:
-                components.append(BgRemovalAction)
-            if cfg.components.director_lineart_enabled:
-                components.append(LineartAction)
-            if cfg.components.director_sketch_enabled:
-                components.append(SketchAction)
-            if cfg.components.director_colorize_enabled:
-                components.append(ColorizeAction)
-            if cfg.components.director_emotion_enabled:
-                components.append(EmotionAction)
+            components.extend(
+                action
+                for flag, action in DIRECTOR_ACTIONS
+                if getattr(config.components, flag)
+            )
 
-        # Command 组件
-        if cfg.components.command_enabled:
-            components.append(ImageGeneratorCommand)
-            components.append(ImageEditCommand)
-            components.append(ImageRefCommand)
-            components.append(VibeManagementCommand)
+        if config.components.command_enabled:
+            components.extend(
+                [
+                    ImageGeneratorCommand,
+                    ImageEditCommand,
+                    ImageReferenceCommand,
+                    VibeManagementCommand,
+                ]
+            )
 
-        # Service 组件
-        components.append(ImageGeneratorService)
-
-        # WebUI Router（WebUI 启用时注册）
-        if cfg.webui.enabled:
+        if config.webui.enabled:
             components.append(WebUIRouter)
 
         return components

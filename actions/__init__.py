@@ -1,7 +1,7 @@
 """图片生成动作组件。"""
 
-from .base_image_action import BaseImageAction
-from .director_tool_action import (
+from .base import BaseImageAction
+from .director import (
     BgRemovalAction,
     ColorizeAction,
     DeclutterAction,
@@ -9,8 +9,8 @@ from .director_tool_action import (
     LineartAction,
     SketchAction,
 )
-from .draw_action import DrawAction
-from .inpaint_action import InpaintAction
+from .draw import DrawAction
+from .inpaint import InpaintAction
 
 __all__ = [
     "BaseImageAction",

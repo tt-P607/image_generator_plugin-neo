@@ -18,15 +18,26 @@ if TYPE_CHECKING:
     from src.core.models.message import Message
     from src.core.models.stream import ChatStream
 
-logger = get_logger("image_generator_plugin.image_source")
+logger = get_logger("image_generator_plugin.message_images")
 
 
-def _message_candidates(stream: "ChatStream", message: "Message | None") -> list[Any]:
-    """按从近到远顺序构建候选消息列表。"""
+def _message_candidates(
+    stream: "ChatStream",
+    message: "Message | None",
+) -> list[Any]:
+    """按从近到远顺序构建候选消息列表。
 
+    Args:
+        stream: 目标聊天流
+        message: 触发消息，可为 None
+
+    Returns:
+        去重后的候选消息列表
+    """
     candidates: list[Any] = []
     if message is not None:
         candidates.append(message)
+
     context = stream.context
     if context.current_message is not None and context.current_message is not message:
         candidates.append(context.current_message)
@@ -44,8 +55,14 @@ def _message_candidates(stream: "ChatStream", message: "Message | None") -> list
 
 
 async def _load_media_data(media: dict[str, Any]) -> str | None:
-    """优先从媒体缓存读取图片，缺失时回退到消息内 base64。"""
+    """优先从媒体缓存读取图片，缺失时回退到消息内 base64。
 
+    Args:
+        media: 消息中的媒体条目
+
+    Returns:
+        图片 base64，读取失败时返回 None
+    """
     image_id = media.get("image_id")
     if isinstance(image_id, str) and image_id.strip():
         info = await get_media_info(image_id)
@@ -64,8 +81,15 @@ async def extract_image_from_stream(
     stream: "ChatStream",
     message: "Message | None" = None,
 ) -> str | None:
-    """从指定聊天流的最近消息中提取图片 base64。"""
+    """从指定聊天流的最近消息中提取图片 base64。
 
+    Args:
+        stream: 目标聊天流
+        message: 触发消息，可为 None
+
+    Returns:
+        图片 base64，未找到时返回 None
+    """
     for candidate in _message_candidates(stream, message):
         content = candidate.content
         if not isinstance(content, dict):
@@ -73,12 +97,13 @@ async def extract_image_from_stream(
         media_items = content.get("media", [])
         if not isinstance(media_items, list):
             continue
+
         for media in media_items:
             if not isinstance(media, dict) or media.get("type") != "image":
                 continue
             try:
                 data = await _load_media_data(media)
-            except Exception as error:
+            except OSError as error:
                 logger.warning(f"读取消息图片失败: {error}")
                 continue
             if data:
@@ -90,12 +115,16 @@ async def extract_image_from_stream_id(
     stream_id: str,
     message: "Message | None" = None,
 ) -> str | None:
-    """通过公开 Stream API 获取聊天流并提取最近图片。"""
+    """通过公开 Stream API 获取聊天流并提取最近图片。
 
+    Args:
+        stream_id: 聊天流 ID
+        message: 触发消息，可为 None
+
+    Returns:
+        图片 base64，未找到时返回 None
+    """
     stream = await get_stream(stream_id)
     if stream is None:
         return None
     return await extract_image_from_stream(stream, message)
-
-
-__all__ = ["extract_image_from_stream", "extract_image_from_stream_id"]
