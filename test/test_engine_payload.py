@@ -51,13 +51,15 @@ def test_official_urls_derive_from_base_url() -> None:
 
 
 def test_upscale_payloads_match_channel_protocols() -> None:
-    """验证 upscale 请求体：official 固定 scale=4，gateway 带 response_format。"""
+    """验证 upscale 请求体：official 固定 scale=4，gateway 走统一端点带 extra。"""
 
     official = payload_builder.build_official_upscale("img", 512, 512)
     assert official == {"image": "img", "width": 512, "height": 512, "scale": 4}
 
-    gateway = payload_builder.build_gateway_upscale("img", 512, 512)
+    gateway = payload_builder.build_gateway_upscale("img", 512, 512, "nai-diffusion-4-5-full")
     assert gateway == {
+        "model": "nai-diffusion-4-5-full",
+        "extra": "upscale",
         "image": "img",
         "width": 512,
         "height": 512,
@@ -193,12 +195,46 @@ def test_gateway_generation_matches_openai_image_schema() -> None:
 
     assert body["size"] == "832x1216"
     assert body["response_format"] == "b64_json"
+    assert body["qualityToggle"] is True
     assert body["characters"][0]["position"] == [0.3, 0.5]
     assert body["character_references"][0]["fidelity"] == 0.75
 
 
-def test_gateway_director_only_accepts_prompt_for_supported_tools() -> None:
-    """验证只有上色/改表情工具才会带上 prompt 与 defry。"""
+def test_gateway_generation_with_vibes_injects_reference_fields() -> None:
+    """验证 Gateway 文生图附带 Vibe 时注入 reference_image_multiple 字段。"""
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        width=832,
+        height=1216,
+    )
+    vibes = (VibeAsset(data="vibe-data", information_extracted=1.0, strength=0.6),)
+    body = payload_builder.build_gateway_generation(make_settings(), spec, vibes)
+
+    assert body["reference_image_multiple"] == ["vibe-data"]
+    assert body["reference_strength_multiple"] == [0.6]
+    assert body["reference_information_extracted_multiple"] == [1.0]
+
+
+def test_gateway_generation_img2img_includes_image_field() -> None:
+    """验证 Gateway 图生图通过 image 字段触发，不再使用独立端点。"""
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        source_image="base64-image",
+        strength=0.7,
+    )
+    body = payload_builder.build_gateway_generation(make_settings(), spec)
+
+    assert body["image"] == "base64-image"
+    assert body["strength"] == 0.7
+    assert body["add_original_image"] is True
+
+
+def test_gateway_director_uses_unified_endpoint_with_extra() -> None:
+    """验证导演工具通过 extra 字段路由到统一端点。"""
 
     colorize = payload_builder.build_gateway_director(
         DirectorToolSpec(
@@ -208,8 +244,11 @@ def test_gateway_director_only_accepts_prompt_for_supported_tools() -> None:
             height=1024,
             prompt="warm tones",
             defry=9,
-        )
+        ),
+        "nai-diffusion-4-5-full",
     )
+    assert colorize["extra"] == "director-colorize"
+    assert colorize["model"] == "nai-diffusion-4-5-full"
     assert colorize["prompt"] == "warm tones"
     assert colorize["defry"] == 5
 
@@ -221,8 +260,10 @@ def test_gateway_director_only_accepts_prompt_for_supported_tools() -> None:
             height=1024,
             prompt="ignored",
             defry=3,
-        )
+        ),
+        "nai-diffusion-4-5-full",
     )
+    assert lineart["extra"] == "director-lineart"
     assert "prompt" not in lineart
     assert "defry" not in lineart
 

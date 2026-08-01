@@ -22,19 +22,17 @@ from .types import (
 SEED_MAX = 999_999_999
 VARIETY_PLUS_SIGMA = 58
 
+# 网关统一图片端点：根据请求体字段（image/mask/extra）自动路由到对应功能。
 GATEWAY_GENERATIONS_PATH = "/v1/images/generations"
-GATEWAY_IMG2IMG_PATH = "/v1/images/img2img"
-GATEWAY_INPAINTING_PATH = "/v1/images/inpainting"
-GATEWAY_VIBE_TRANSFER_PATH = "/v1/images/vibe-transfer"
-GATEWAY_ENCODE_VIBE_PATH = "/v1/images/encode-vibe"
-GATEWAY_UPSCALE_PATH = "/v1/images/upscale"
-GATEWAY_DIRECTOR_PATHS: dict[str, str] = {
-    "declutter": "/v1/images/director-declutter",
-    "bg-removal": "/v1/images/director-bg-remover",
-    "lineart": "/v1/images/director-lineart",
-    "sketch": "/v1/images/director-sketch",
-    "colorize": "/v1/images/director-colorize",
-    "emotion": "/v1/images/director-emotion",
+
+# 导演工具 tool_type → extra 值映射
+GATEWAY_DIRECTOR_EXTRAS: dict[str, str] = {
+    "declutter": "director-declutter",
+    "bg-removal": "director-bg-remover",
+    "lineart": "director-lineart",
+    "sketch": "director-sketch",
+    "colorize": "director-colorize",
+    "emotion": "director-emotion",
 }
 
 PROMPT_TOOLS = ("colorize", "emotion")
@@ -410,18 +408,24 @@ def build_gateway_upscale(
     image_b64: str,
     width: int,
     height: int,
+    model: str,
 ) -> dict[str, Any]:
     """构造 Gateway 渠道 4x 放大请求体。
+
+    统一走 ``/v1/images/generations`` 端点，通过 ``extra: "upscale"`` 触发放大。
 
     Args:
         image_b64: 源图 base64
         width: 源图宽度
         height: 源图高度
+        model: 标准模型名
 
     Returns:
-        Gateway upscale 请求体
+        Gateway generations（upscale）请求体
     """
     return {
+        "model": model,
+        "extra": "upscale",
         "image": image_b64,
         "width": width,
         "height": height,
@@ -434,7 +438,10 @@ def build_encode_vibe(
     image_b64: str,
     information_extracted: float,
 ) -> dict[str, Any]:
-    """构造 Vibe 编码请求体（两个渠道通用）。
+    """构造 Vibe 编码请求体。
+
+    Gateway 渠道统一走 ``/v1/images/generations`` 端点，通过 ``extra: "encode-vibe"``
+    触发编码；official 渠道走 ``/ai/encode-vibe``。请求体结构两渠道通用。
 
     Args:
         settings: 引擎配置快照
@@ -454,12 +461,19 @@ def build_encode_vibe(
 def build_gateway_generation(
     settings: EngineSettings,
     spec: GenerationSpec,
+    vibes: tuple[VibeAsset, ...] = (),
 ) -> dict[str, Any]:
-    """构造 Gateway 渠道文生图请求体。
+    """构造 Gateway 渠道文生图 / 图生图 / Vibe 转移请求体。
+
+    新版网关统一使用 ``/v1/images/generations`` 端点，根据请求体字段自动路由：
+    - 仅 ``prompt``：文生图
+    - ``prompt`` + ``image``：图生图
+    - ``prompt`` + ``reference_image_multiple``：Vibe 风格转移
 
     Args:
         settings: 引擎配置快照
         spec: 生图请求描述
+        vibes: 已编码的 Vibe 列表，非空时注入参考图字段
 
     Returns:
         Gateway generations 请求体
@@ -481,11 +495,22 @@ def build_gateway_generation(
         "sampler": settings.sampler,
         "noise_schedule": settings.noise_schedule,
         "ucPreset": settings.uc_preset,
-        "quality": True,
+        "qualityToggle": True,
         "variety_boost": settings.variety_plus,
         "use_coords": bool(spec.characters and settings.always_use_coords),
         "response_format": "b64_json",
     }
+
+    # 图生图：提供 image 字段即走 img2img
+    if spec.is_img2img and spec.source_image:
+        strength = (
+            spec.strength
+            if spec.strength is not None
+            else settings.img2img_default_strength
+        )
+        payload["image"] = spec.source_image
+        payload["strength"] = strength
+        payload["add_original_image"] = True
 
     if spec.characters:
         payload["characters"] = [
@@ -510,80 +535,14 @@ def build_gateway_generation(
             for ref in spec.director_refs
         ]
 
-    return payload
-
-
-def build_gateway_img2img(
-    settings: EngineSettings,
-    spec: GenerationSpec,
-) -> dict[str, Any]:
-    """构造 Gateway 渠道图生图请求体。
-
-    Args:
-        settings: 引擎配置快照
-        spec: 生图请求描述，必须携带 source_image
-
-    Returns:
-        Gateway img2img 请求体
-    """
-    strength = (
-        spec.strength
-        if spec.strength is not None
-        else settings.img2img_default_strength
-    )
-    return {
-        "model": settings.model,
-        "prompt": spec.prompt,
-        "image": spec.source_image,
-        "strength": strength,
-        # 边缘融合：与 official 渠道行为一致，把原图叠回生成结果。
-        "add_original_image": True,
-        "size": f"{spec.width}x{spec.height}",
-        "scale": spec.scale if spec.scale is not None else settings.scale,
-        "cfg_rescale": (
-            spec.cfg_rescale if spec.cfg_rescale is not None else settings.cfg_rescale
-        ),
-        "sampler": settings.sampler,
-        "noise_schedule": settings.noise_schedule,
-        "negative_prompt": merge_negative_prompts(
-            settings.negative_prompt,
-            spec.negative_prompt,
-        ),
-        "response_format": "b64_json",
-    }
-
-
-def build_gateway_vibe_transfer(
-    settings: EngineSettings,
-    spec: GenerationSpec,
-    vibes: tuple[VibeAsset, ...],
-) -> dict[str, Any]:
-    """构造 Gateway 渠道 Vibe Transfer 请求体。
-
-    Args:
-        settings: 引擎配置快照
-        spec: 生图请求描述
-        vibes: 已编码的 Vibe 列表
-
-    Returns:
-        Gateway vibe-transfer 请求体
-    """
-    return {
-        "model": settings.model,
-        "prompt": spec.prompt,
-        "reference_image_multiple": [vibe.data for vibe in vibes],
-        "reference_strength_multiple": [vibe.strength for vibe in vibes],
-        "reference_information_extracted_multiple": [
+    if vibes:
+        payload["reference_image_multiple"] = [vibe.data for vibe in vibes]
+        payload["reference_strength_multiple"] = [vibe.strength for vibe in vibes]
+        payload["reference_information_extracted_multiple"] = [
             vibe.information_extracted for vibe in vibes
-        ],
-        "width": spec.width,
-        "height": spec.height,
-        "scale": spec.scale if spec.scale is not None else settings.scale,
-        "cfg_rescale": (
-            spec.cfg_rescale if spec.cfg_rescale is not None else settings.cfg_rescale
-        ),
-        "response_format": "b64_json",
-    }
+        ]
+
+    return payload
 
 
 def build_gateway_inpaint(
@@ -592,12 +551,15 @@ def build_gateway_inpaint(
 ) -> dict[str, Any]:
     """构造 Gateway 渠道局部重绘请求体。
 
+    新版网关统一使用 ``/v1/images/generations`` 端点，提供 ``image`` + ``mask``
+    即走局部重绘。
+
     Args:
         settings: 引擎配置快照
         spec: 局部重绘请求描述
 
     Returns:
-        Gateway inpainting 请求体
+        Gateway generations（inpainting）请求体
     """
     return {
         "model": settings.model,
@@ -622,16 +584,29 @@ def build_gateway_inpaint(
     }
 
 
-def build_gateway_director(spec: DirectorToolSpec) -> dict[str, Any]:
+def build_gateway_director(
+    spec: DirectorToolSpec,
+    model: str,
+) -> dict[str, Any]:
     """构造 Gateway 渠道导演工具请求体。
+
+    新版网关统一使用 ``/v1/images/generations`` 端点，通过 ``extra: "director-{tool}"``
+    触发对应导演工具。
 
     Args:
         spec: 导演工具请求描述
+        model: 标准模型名
 
     Returns:
-        Gateway director 请求体
+        Gateway generations（director）请求体
     """
+    extra = GATEWAY_DIRECTOR_EXTRAS.get(spec.tool_type)
+    if extra is None:
+        raise ValueError(f"未知的导演工具类型: {spec.tool_type}")
+
     payload: dict[str, Any] = {
+        "model": model,
+        "extra": extra,
         "image": spec.source_image,
         "width": spec.width,
         "height": spec.height,

@@ -108,6 +108,29 @@ def test_config_discards_empty_vibe_placeholders() -> None:
     assert config.vibe.selectable[0].file == "valid.naiv4vibe"
 
 
+def test_config_discards_empty_director_reference_placeholders() -> None:
+    """验证渲染器生成的空精密参考占位项不会阻断配置加载。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["director_reference"]["selectable"] = [
+        {"file": "", "enabled": True, "name": "", "description": "", "type": "character&style", "fidelity": 1.0, "strength": 1.0},
+        {"file": "   ", "enabled": True, "name": "", "description": "", "type": "character&style", "fidelity": 1.0, "strength": 1.0},
+        {
+            "file": "valid_ref.png",
+            "enabled": True,
+            "name": "有效参考",
+            "description": "有效项",
+            "type": "character",
+            "fidelity": 1.0,
+            "strength": 0.5,
+        },
+    ]
+
+    config = ImageGeneratorConfig.model_validate(raw)
+    assert len(config.director_reference.selectable) == 1
+    assert config.director_reference.selectable[0].file == "valid_ref.png"
+
+
 def test_config_list_defaults_are_isolated() -> None:
     """验证列表默认值不在实例之间共享。"""
 

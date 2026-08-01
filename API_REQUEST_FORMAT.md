@@ -258,6 +258,22 @@ POST https://image.novelai.net/ai/augment-image
 
 ## Gateway 请求
 
+新版网关（v0.4.0+）统一使用 ``POST /v1/images/generations`` 端点，根据请求体字段
+和 ``extra`` 字段自动路由到对应功能。不再使用独立的 img2img / inpainting /
+vibe-transfer / encode-vibe / upscale / director-* 端点。
+
+### 路由规则
+
+| 请求体特征 | 网关行为 |
+|-----------|---------|
+| `prompt` | 文生图 |
+| `prompt` + `image` | 图生图 |
+| `prompt` + `image` + `mask` | 局部重绘 |
+| `extra: "upscale"` + `image` | 4x 放大 |
+| `extra: "encode-vibe"` + `image` | Vibe 编码 |
+| `extra: "director-{tool}"` + `image` | 导演工具 |
+| `reference_image_multiple` 非空 | Vibe 风格转移（文生图附带参考图） |
+
 ### 文生图
 
 ```http
@@ -277,14 +293,14 @@ POST /v1/images/generations
   "sampler": "k_euler_ancestral",
   "noise_schedule": "karras",
   "ucPreset": 0,
-  "quality": true,
+  "qualityToggle": true,
   "variety_boost": false,
   "use_coords": false,
   "response_format": "b64_json"
 }
 ```
 
-### Gateway 多人物
+### 多人物
 
 ```json
 {
@@ -300,7 +316,7 @@ POST /v1/images/generations
 }
 ```
 
-### Gateway 精密参考
+### 精密参考
 
 ```json
 {
@@ -316,11 +332,13 @@ POST /v1/images/generations
 }
 ```
 
-### Gateway 图生图
+### 图生图
 
 ```http
-POST /v1/images/img2img
+POST /v1/images/generations
 ```
+
+在文生图基础上额外提供 `image` 字段即走图生图：
 
 ```json
 {
@@ -328,6 +346,7 @@ POST /v1/images/img2img
   "prompt": "1girl, blue dress",
   "image": "<base64>",
   "strength": 0.7,
+  "add_original_image": true,
   "size": "1024x1024",
   "scale": 5.0,
   "cfg_rescale": 0.0,
@@ -338,11 +357,13 @@ POST /v1/images/img2img
 }
 ```
 
-### Gateway 局部重绘
+### 局部重绘
 
 ```http
-POST /v1/images/inpainting
+POST /v1/images/generations
 ```
+
+在图生图基础上额外提供 `mask` 字段即走局部重绘：
 
 ```json
 {
@@ -351,6 +372,7 @@ POST /v1/images/inpainting
   "image": "<base64 source>",
   "mask": "<base64 mask>",
   "strength": 0.7,
+  "add_original_image": true,
   "size": "1024x1024",
   "scale": 5.0,
   "cfg_rescale": 0.0,
@@ -361,33 +383,13 @@ POST /v1/images/inpainting
 }
 ```
 
-### Gateway Vibe 编码
+### Vibe 风格转移
 
 ```http
-POST /v1/images/encode-vibe
+POST /v1/images/generations
 ```
 
-```json
-{
-  "model": "nai-diffusion-4-5-curated",
-  "image": "<base64>",
-  "information_extracted": 1.0
-}
-```
-
-响应：
-
-```json
-{
-  "data": "<encoded vibe>"
-}
-```
-
-### Gateway Vibe Transfer
-
-```http
-POST /v1/images/vibe-transfer
-```
+在文生图基础上附带 `reference_image_multiple` 字段即走 Vibe 转移：
 
 ```json
 {
@@ -396,29 +398,80 @@ POST /v1/images/vibe-transfer
   "reference_image_multiple": ["<encoded vibe>"],
   "reference_strength_multiple": [0.6],
   "reference_information_extracted_multiple": [1.0],
-  "width": 832,
-  "height": 1216,
+  "size": "832x1216",
   "scale": 5.0,
   "cfg_rescale": 0.0,
   "response_format": "b64_json"
 }
 ```
 
-### Gateway Director
+### Vibe 编码
 
-| 功能 | 端点 |
-|---|---|
-| 去杂物 | `/v1/images/director-declutter` |
-| 背景移除 | `/v1/images/director-bg-remover` |
-| 线稿 | `/v1/images/director-lineart` |
-| 草图 | `/v1/images/director-sketch` |
-| 上色 | `/v1/images/director-colorize` |
-| 表情 | `/v1/images/director-emotion` |
+```http
+POST /v1/images/generations
+```
+
+通过 `extra: "encode-vibe"` 触发：
+
+```json
+{
+  "model": "nai-diffusion-4-5-curated",
+  "extra": "encode-vibe",
+  "image": "<base64>",
+  "information_extracted": 1.0
+}
+```
+
+响应（统一端点返回 list 格式）：
+
+```json
+{
+  "data": [{"b64_json": "<encoded vibe>"}]
+}
+```
+
+### 4x 放大
+
+```http
+POST /v1/images/generations
+```
+
+通过 `extra: "upscale"` 触发：
+
+```json
+{
+  "model": "nai-diffusion-4-5-curated",
+  "extra": "upscale",
+  "image": "<base64>",
+  "width": 512,
+  "height": 512,
+  "response_format": "b64_json"
+}
+```
+
+### 导演工具
+
+```http
+POST /v1/images/generations
+```
+
+通过 `extra: "director-{tool}"` 触发：
+
+| extra 值 | 功能 |
+|---------|------|
+| `director-declutter` | 去杂物 |
+| `director-bg-remover` | 精细抠图 |
+| `director-lineart` | 提取线稿 |
+| `director-sketch` | 转铅笔画 |
+| `director-colorize` | 线稿上色 |
+| `director-emotion` | 改变表情 |
 
 请求示例：
 
 ```json
 {
+  "model": "nai-diffusion-4-5-curated",
+  "extra": "director-colorize",
   "image": "<base64>",
   "width": 1024,
   "height": 1024,

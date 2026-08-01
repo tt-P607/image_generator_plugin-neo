@@ -318,21 +318,16 @@ class ImageEngine:
         api_key: str,
         target_dir: Path,
     ) -> ImageResult:
-        """在 Gateway 渠道下按请求内容选择端点。"""
+        """在 Gateway 渠道下执行文生图 / 图生图 / Vibe 转移。
 
-        if spec.is_img2img:
-            url = self._settings.gateway_url(payload_builder.GATEWAY_IMG2IMG_PATH)
-            body = payload_builder.build_gateway_img2img(self._settings, spec)
-        elif vibes:
-            url = self._settings.gateway_url(
-                payload_builder.GATEWAY_VIBE_TRANSFER_PATH
-            )
-            body = payload_builder.build_gateway_vibe_transfer(
-                self._settings, spec, vibes
-            )
-        else:
-            url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
-            body = payload_builder.build_gateway_generation(self._settings, spec)
+        新版网关统一使用 ``/v1/images/generations`` 端点，根据请求体字段
+        （image / reference_image_multiple）自动路由到对应功能。
+        """
+
+        url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
+        body = payload_builder.build_gateway_generation(
+            self._settings, spec, vibes
+        )
 
         logger.info(f"[Gateway] POST {url} | {spec.width}x{spec.height}")
         response = await self._http.post_json(url, body, api_key)
@@ -350,7 +345,7 @@ class ImageEngine:
         logger.info(f"局部重绘 {spec.width}x{spec.height} | strength={spec.strength}")
 
         if self._settings.is_gateway:
-            url = self._settings.gateway_url(payload_builder.GATEWAY_INPAINTING_PATH)
+            url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
             body = payload_builder.build_gateway_inpaint(self._settings, spec)
             response = await self._http.post_json(url, body, api_key)
             return await self._save_gateway_response(response, api_key, target_dir)
@@ -380,8 +375,10 @@ class ImageEngine:
         logger.info(f"4x 放大 {width}x{height}")
 
         if self._settings.is_gateway:
-            url = self._settings.gateway_url(payload_builder.GATEWAY_UPSCALE_PATH)
-            body = payload_builder.build_gateway_upscale(clean, width, height)
+            url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
+            body = payload_builder.build_gateway_upscale(
+                clean, width, height, self._settings.model
+            )
             response = await self._http.post_json(url, body, api_key)
             return await self._save_gateway_response(response, api_key, target_dir)
 
@@ -405,13 +402,9 @@ class ImageEngine:
         logger.info(f"导演工具 {spec.tool_type} | {spec.width}x{spec.height}")
 
         if self._settings.is_gateway:
-            path = payload_builder.GATEWAY_DIRECTOR_PATHS[spec.tool_type]
-            body = payload_builder.build_gateway_director(spec)
-            response = await self._http.post_json(
-                self._settings.gateway_url(path),
-                body,
-                api_key,
-            )
+            url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
+            body = payload_builder.build_gateway_director(spec, self._settings.model)
+            response = await self._http.post_json(url, body, api_key)
             return await self._save_gateway_response(response, api_key, target_dir)
 
         body = payload_builder.build_official_director(spec)
@@ -529,11 +522,23 @@ class ImageEngine:
 
         try:
             if self._settings.is_gateway:
+                # 新版网关统一走 /v1/images/generations，通过 extra: "encode-vibe" 触发。
+                # encode-vibe 请求体需要额外携带 extra 字段。
+                body["extra"] = "encode-vibe"
                 url = self._settings.gateway_url(
-                    payload_builder.GATEWAY_ENCODE_VIBE_PATH
+                    payload_builder.GATEWAY_GENERATIONS_PATH
                 )
                 response = await self._http.post_json(url, body, api_key, timeout=60)
-                encoded = response.get("data")
+                data = response.get("data")
+                # 统一端点返回 {"data": [{"b64_json": "..."}]}
+                if isinstance(data, list) and data:
+                    entry = data[0]
+                    if isinstance(entry, dict):
+                        encoded = entry.get("b64_json")
+                    else:
+                        encoded = entry
+                else:
+                    encoded = data
                 return encoded if isinstance(encoded, str) and encoded else None
 
             raw = await self._http.post_binary(

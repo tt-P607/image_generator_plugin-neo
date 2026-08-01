@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args, get_origin
 
 from pydantic import model_validator
 
@@ -107,6 +107,28 @@ class PromptPresetConfig(SectionBase):
     )
 
 
+def _resolve_section_model(annotation: Any) -> type[SectionBase] | None:
+    """从字段类型注解中提取 ``SectionBase`` 子类。
+
+    支持两种形态：
+    - 直接为 ``SectionBase`` 子类（单节字段） → 返回该类
+    - ``list[SectionBase子类]`` → 返回列表元素类型
+
+    其他注解返回 ``None``，表示该字段不包含需要清洗的列表子节。
+    """
+
+    if isinstance(annotation, type) and issubclass(annotation, SectionBase):
+        return annotation
+
+    origin = get_origin(annotation)
+    if origin is list:
+        args = get_args(annotation)
+        if args and isinstance(args[0], type) and issubclass(args[0], SectionBase):
+            return args[0]
+
+    return None
+
+
 class ImageGeneratorConfig(BaseConfig):
     """图片生成插件配置。"""
 
@@ -115,32 +137,49 @@ class ImageGeneratorConfig(BaseConfig):
 
     @model_validator(mode="before")
     @classmethod
-    def discard_empty_vibe_items(cls, data: Any) -> Any:
-        """丢弃配置渲染器为 Vibe 空列表生成的空文件占位项。"""
+    def discard_empty_list_placeholders(cls, data: Any) -> Any:
+        """丢弃配置渲染器为空列表生成的空文件占位项。
+
+        渲染器（``_render_toml_with_signature``）在 list section 为空时，
+        会通过 ``_merge_section_fields(model, {})`` 补一个默认占位项。
+        对于 ``file`` 这类有 ``min_length=1`` 约束但无显式默认值的必填 str 字段，
+        占位值为空字符串，写入 TOML 后加载校验会失败。
+
+        此验证器在 ``mode="before"`` 阶段自动扫描所有配置节中类型为
+        ``list[SectionBase子类]`` 且子类含 ``file`` 字段的列表，
+        丢弃 ``file`` 为空或纯空白的占位项。
+        """
 
         if not isinstance(data, dict):
             return data
 
-        vibe = data.get("vibe")
-        if not isinstance(vibe, dict):
-            return data
-
         sanitized_data = dict(data)
-        sanitized_vibe = dict(vibe)
-        for field_name in ("always", "selectable"):
-            items = sanitized_vibe.get(field_name)
-            if not isinstance(items, list):
-                continue
-            sanitized_vibe[field_name] = [
-                item
-                for item in items
-                if not (
-                    isinstance(item, dict)
-                    and not str(item.get("file", "")).strip()
-                )
-            ]
 
-        sanitized_data["vibe"] = sanitized_vibe
+        for section_name, field_info in cls.model_fields.items():
+            section_model = _resolve_section_model(field_info.annotation)
+            if section_model is None:
+                continue
+
+            section_data = sanitized_data.get(section_name)
+            if not isinstance(section_data, dict):
+                continue
+
+            sanitized_section = dict(section_data)
+            for sub_name, sub_field in section_model.model_fields.items():
+                sub_items = sanitized_section.get(sub_name)
+                if not isinstance(sub_items, list):
+                    continue
+                sanitized_section[sub_name] = [
+                    item
+                    for item in sub_items
+                    if not (
+                        isinstance(item, dict)
+                        and not str(item.get("file", "")).strip()
+                    )
+                ]
+
+            sanitized_data[section_name] = sanitized_section
+
         return sanitized_data
 
     @config_section("plugin")

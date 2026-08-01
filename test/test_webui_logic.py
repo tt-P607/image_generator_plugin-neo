@@ -73,15 +73,15 @@ def test_parse_resolution_falls_back_on_invalid_input() -> None:
 
 
 def test_gateway_document_covers_used_endpoints() -> None:
-    """验证 API 文档覆盖插件实际调用的 Gateway 端点。"""
+    """验证 API 文档覆盖插件实际调用的 Gateway 端点与 extra 路由值。"""
 
     document = (PLUGIN_ROOT / "API_REQUEST_FORMAT.md").read_text(encoding="utf-8")
     expected = {
         "/v1/images/generations",
-        "/v1/images/img2img",
-        "/v1/images/inpainting",
-        "/v1/images/encode-vibe",
-        "/v1/images/vibe-transfer",
-        "/v1/images/director-declutter",
+        "extra",
+        "upscale",
+        "encode-vibe",
+        "director-colorize",
+        "qualityToggle",
     }
-    assert all(endpoint in document for endpoint in expected)
+    assert all(token in document for token in expected)
