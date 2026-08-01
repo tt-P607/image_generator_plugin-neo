@@ -32,6 +32,12 @@
         },
         {
             "component_type": "action",
+            "component_name": "edit_image",
+            "dependencies": [],
+            "enabled": true
+        },
+        {
+            "component_type": "action",
             "component_name": "director_declutter",
             "dependencies": [],
             "enabled": true

@@ -14,6 +14,8 @@ from ..config import ImageGeneratorConfig
 OFFICIAL_GENERATE_PATH = "/ai/generate-image"
 OFFICIAL_ENCODE_VIBE_PATH = "/ai/encode-vibe"
 OFFICIAL_AUGMENT_PATH = "/ai/augment-image"
+OFFICIAL_UPSCALE_PATH = "/ai/upscale"
+OFFICIAL_SUBSCRIPTION_PATH = "/user/subscription"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +173,18 @@ class EngineSettings:
         """official 渠道导演工具端点。"""
 
         return f"{self.api_base_url.rstrip('/')}{OFFICIAL_AUGMENT_PATH}"
+
+    @property
+    def official_upscale_url(self) -> str:
+        """official 渠道 4x 放大端点。"""
+
+        return f"{self.api_base_url.rstrip('/')}{OFFICIAL_UPSCALE_PATH}"
+
+    @property
+    def official_subscription_url(self) -> str:
+        """official 渠道订阅信息端点。"""
+
+        return f"{self.api_base_url.rstrip('/')}{OFFICIAL_SUBSCRIPTION_PATH}"
 
     def output_dir(self, from_command: bool) -> Path:
         """按调用来源选择图片保存目录。

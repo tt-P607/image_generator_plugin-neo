@@ -20,8 +20,8 @@ logger = get_logger("image_generator_plugin.director_action")
 
 IMAGE_SOURCE_HINT = (
     "**图片来源**：\n"
-    "  - 处理 Bot 自己生成的图片：填写 image_filename 参数\n"
-    "  - 处理用户发送的图片：引用该图片，留空 image_filename"
+    "  - 处理用户发送的图片：从上下文 [图片(media_id)] 提取哈希值填入 media_id 参数\n"
+    "  - 处理 Bot 自己生成的图片：填写 image_filename 参数"
 )
 FREE_TIER_HINT = "标准尺寸（≤1024×1024）内免费。"
 FALLBACK_IMAGE_SIZE = (1024, 1024)
@@ -44,11 +44,17 @@ class BaseDirectorAction(BaseImageAction):
 
     async def execute(
         self,
+        media_id: Annotated[
+            str,
+            "待处理图片的媒体 ID。用户发送的图片在上下文中以 "
+            "[图片(media_id)] 出现，从占位符括号内提取哈希值填入此参数。"
+            "处理 Bot 自己生成的图片时留空，改用 image_filename。",
+        ] = "",
         image_filename: Annotated[
             str,
             "Bot 自己生成的图片文件名（draw_image 时自定义的 output_filename）。"
             "填写后从产图目录加载该图片处理，无需引用消息。"
-            "处理用户发送的图片时留空，通过引用消息自动提取。",
+            "处理用户发送的图片时留空，改用 media_id。",
         ] = "",
         prompt: Annotated[
             str,
@@ -67,12 +73,14 @@ class BaseDirectorAction(BaseImageAction):
         if self.needs_prompt and not prompt.strip():
             return False, f"{self.tool_display}工具需要提供 prompt 参数"
 
-        image_b64 = await self.resolve_source_image(image_filename)
+        image_b64 = await self.resolve_source_image(image_filename, media_id)
         if not image_b64:
             hint = (
-                f"找不到文件名为 '{image_filename}' 的图片"
+                f"找不到 media_id={media_id} 对应的图片"
+                if media_id.strip()
+                else f"找不到文件名为 '{image_filename}' 的图片"
                 if image_filename.strip()
-                else "需要先发一张图片，或提供 image_filename，我才能帮你处理哦"
+                else "需要先发一张图片（提供 media_id 或 image_filename），我才能帮你处理哦"
             )
             await self.notify(hint)
             return False, hint

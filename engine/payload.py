@@ -27,6 +27,7 @@ GATEWAY_IMG2IMG_PATH = "/v1/images/img2img"
 GATEWAY_INPAINTING_PATH = "/v1/images/inpainting"
 GATEWAY_VIBE_TRANSFER_PATH = "/v1/images/vibe-transfer"
 GATEWAY_ENCODE_VIBE_PATH = "/v1/images/encode-vibe"
+GATEWAY_UPSCALE_PATH = "/v1/images/upscale"
 GATEWAY_DIRECTOR_PATHS: dict[str, str] = {
     "declutter": "/v1/images/director-declutter",
     "bg-removal": "/v1/images/director-bg-remover",
@@ -382,6 +383,52 @@ def build_official_director(
     return payload
 
 
+def build_official_upscale(
+    image_b64: str,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """构造 official 渠道 4x 放大请求体。
+
+    Args:
+        image_b64: 源图 base64
+        width: 源图宽度
+        height: 源图高度
+
+    Returns:
+        official upscale 请求体
+    """
+    return {
+        "image": image_b64,
+        "width": width,
+        "height": height,
+        "scale": 4,
+    }
+
+
+def build_gateway_upscale(
+    image_b64: str,
+    width: int,
+    height: int,
+) -> dict[str, Any]:
+    """构造 Gateway 渠道 4x 放大请求体。
+
+    Args:
+        image_b64: 源图 base64
+        width: 源图宽度
+        height: 源图高度
+
+    Returns:
+        Gateway upscale 请求体
+    """
+    return {
+        "image": image_b64,
+        "width": width,
+        "height": height,
+        "response_format": "b64_json",
+    }
+
+
 def build_encode_vibe(
     settings: EngineSettings,
     image_b64: str,
@@ -489,6 +536,8 @@ def build_gateway_img2img(
         "prompt": spec.prompt,
         "image": spec.source_image,
         "strength": strength,
+        # 边缘融合：与 official 渠道行为一致，把原图叠回生成结果。
+        "add_original_image": True,
         "size": f"{spec.width}x{spec.height}",
         "scale": spec.scale if spec.scale is not None else settings.scale,
         "cfg_rescale": (
@@ -556,6 +605,8 @@ def build_gateway_inpaint(
         "image": spec.source_image,
         "mask": spec.mask,
         "strength": spec.strength,
+        # 边缘融合：把原图叠回生成结果，避免重绘区域边缘生硬。
+        "add_original_image": True,
         "size": f"{spec.width}x{spec.height}",
         "scale": spec.scale if spec.scale is not None else settings.scale,
         "cfg_rescale": (

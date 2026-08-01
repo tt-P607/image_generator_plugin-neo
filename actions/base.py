@@ -18,7 +18,7 @@ from .. import background
 from ..config import ImageGeneratorConfig
 from ..engine import ImageEngine, ImageResult
 from ..engine import storage
-from ..media import extract_image_from_stream
+from ..media import extract_image_by_media_id, extract_image_from_stream
 
 if TYPE_CHECKING:
     from ..plugin import ImageGeneratorPlugin
@@ -61,7 +61,10 @@ class BaseImageAction(BaseAction):
     def engine(self) -> ImageEngine | None:
         """当前图片生成引擎，未就绪时返回 None。"""
 
-        engine = self.image_plugin.engine
+        from ..plugin import ImageGeneratorPlugin
+
+        plugin = cast(ImageGeneratorPlugin, self.plugin)
+        engine: ImageEngine | None = plugin.engine  # type: ignore[union-attr]
         if engine is None:
             logger.error("图片生成引擎尚未初始化")
         return engine
@@ -70,17 +73,35 @@ class BaseImageAction(BaseAction):
     def plugin_config(self) -> ImageGeneratorConfig:
         """当前插件配置。"""
 
-        return self.image_plugin.image_config
+        from ..plugin import ImageGeneratorPlugin
 
-    async def resolve_source_image(self, filename: str) -> str | None:
-        """按文件名或引用消息解析待处理图片。
+        plugin = cast(ImageGeneratorPlugin, self.plugin)
+        return plugin.image_config  # type: ignore[union-attr]
+
+    async def resolve_source_image(
+        self,
+        filename: str,
+        media_id: str = "",
+    ) -> str | None:
+        """按媒体 ID 或文件名解析待处理图片。
+
+        media_id（上下文 ``[图片(media_id)]`` 占位符中的哈希）优先，
+        其次按产图文件名加载；两者都不提供时回退到最近消息中的图片。
 
         Args:
-            filename: Bot 自己生成的图片文件名，留空表示从消息中提取
+            filename: Bot 自己生成的图片文件名，可为空
+            media_id: 上下文占位符中的媒体 ID（SHA256 哈希），可为空
 
         Returns:
             图片 base64，未找到时返回 None
         """
+        if media_id.strip():
+            loaded = await extract_image_by_media_id(media_id)
+            if loaded is not None:
+                return loaded
+            logger.warning(f"media_id={media_id} 取图失败")
+            return None
+
         if filename.strip():
             loaded = self._load_generated_image(filename)
             if loaded is not None:

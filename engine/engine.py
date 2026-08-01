@@ -204,6 +204,60 @@ class ImageEngine:
         """
         return await self._submit(lambda: self._run_director(spec))
 
+    async def upscale(
+        self,
+        image_b64: str,
+        *,
+        from_command: bool = False,
+    ) -> ImageResult:
+        """执行 4x 图片放大。
+
+        Args:
+            image_b64: 源图 base64
+            from_command: 结果是否保存到命令图片目录
+
+        Returns:
+            执行结果
+        """
+        return await self._submit(lambda: self._run_upscale(image_b64, from_command))
+
+    async def get_user_info(self) -> tuple[bool, str]:
+        """查询账号订阅信息（仅 official 渠道支持）。
+
+        Returns:
+            (是否成功, 面向用户的说明文本)
+        """
+        api_key = self._current_key()
+        if not api_key:
+            return False, "API Key 没配置，联系管理员看看"
+        if self._settings.is_gateway:
+            return False, "Gateway 渠道不支持账号信息查询"
+
+        try:
+            data = await self._http.get_json(
+                self._settings.official_subscription_url,
+                api_key,
+            )
+        except (RateLimitedError, ApiRequestError, aiohttp.ClientError) as error:
+            return False, f"账号信息查询失败: {error}"
+        except asyncio.TimeoutError:
+            return False, "账号信息查询超时了"
+
+        tier_names = {0: "Paper", 1: "Tablet", 2: "Scroll", 3: "Opus"}
+        tier = data.get("tier")
+        active = data.get("active")
+        tier_text = tier_names.get(tier, str(tier)) if tier is not None else "未知"
+        lines = [
+            f"订阅等级: {tier_text}",
+            f"订阅状态: {'有效' if active else '已过期'}",
+        ]
+        training = data.get("trainingStepsLeft")
+        if isinstance(training, dict):
+            fixed = training.get("fixedTrainingStepsLeft", 0)
+            purchased = training.get("purchasedTrainingSteps", 0)
+            lines.append(f"Anlas: 固定 {fixed} / 购买 {purchased}")
+        return True, "\n".join(lines)
+
     async def _submit(self, task: Callable[[], Awaitable[ImageResult]]) -> ImageResult:
         """把任务投入串行队列并统一兜底异常。
 
@@ -309,6 +363,36 @@ class ImageEngine:
         )
         return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
 
+    async def _run_upscale(self, image_b64: str, from_command: bool) -> ImageResult:
+        """在队列内执行一次 4x 放大。"""
+
+        await self._queue.wait_for_cooldown()
+        api_key = self._current_key()
+        if not api_key:
+            return ImageResult.failure("API Key 没配置，联系管理员看看")
+
+        clean = image_ops.strip_data_url_prefix(image_b64)
+        width, height = image_ops.read_image_size(clean)
+        if not width or not height:
+            return ImageResult.failure("无法读取图片尺寸")
+
+        target_dir = self._settings.output_dir(from_command)
+        logger.info(f"4x 放大 {width}x{height}")
+
+        if self._settings.is_gateway:
+            url = self._settings.gateway_url(payload_builder.GATEWAY_UPSCALE_PATH)
+            body = payload_builder.build_gateway_upscale(clean, width, height)
+            response = await self._http.post_json(url, body, api_key)
+            return await self._save_gateway_response(response, api_key, target_dir)
+
+        body = payload_builder.build_official_upscale(clean, width, height)
+        raw = await self._http.post_binary(
+            self._settings.official_upscale_url,
+            body,
+            api_key,
+        )
+        return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
+
     async def _run_director(self, spec: DirectorToolSpec) -> ImageResult:
         """在队列内执行一次导演工具处理。"""
 
@@ -339,7 +423,7 @@ class ImageEngine:
         return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
 
     def _prepare_img2img(self, spec: GenerationSpec) -> GenerationSpec:
-        """official 渠道图生图时按需缩放原图到免费像素范围。
+        """official 渠道图生图时按需缩放原图到免费像素范围并对齐 64。
 
         Args:
             spec: 原始请求描述
@@ -355,12 +439,12 @@ class ImageEngine:
         width, height = image_ops.read_image_size(spec.source_image)
         if not width or not height:
             return spec
-        if width * height <= image_ops.FREE_TIER_MAX_PIXELS:
-            return spec
 
         scaled, new_width, new_height = image_ops.downscale_to_free_tier(
             spec.source_image
         )
+        if (new_width, new_height) == (width, height):
+            return spec
         logger.info(f"图生图原图自动缩放: {width}x{height} → {new_width}x{new_height}")
         return replace_spec(spec, scaled, new_width, new_height)
 

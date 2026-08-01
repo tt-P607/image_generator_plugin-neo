@@ -168,6 +168,10 @@ class ImageGeneratorConfig(BaseConfig):
             default=True,
             description="是否启用局部重绘 Action（inpaint_image）",
         )
+        edit_action_enabled: bool = Field(
+            default=True,
+            description="是否启用图生图 Action（edit_image：整图重绘，无需遮罩）",
+        )
         director_declutter_enabled: bool = Field(
             default=True,
             description="是否启用导演工具-去杂物（declutter：清理多余元素、遮挡物和文字）",

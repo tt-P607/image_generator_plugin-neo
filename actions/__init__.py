@@ -10,6 +10,7 @@ from .director import (
     SketchAction,
 )
 from .draw import DrawAction
+from .edit import EditImageAction
 from .inpaint import InpaintAction
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "ColorizeAction",
     "DeclutterAction",
     "DrawAction",
+    "EditImageAction",
     "EmotionAction",
     "InpaintAction",
     "LineartAction",

@@ -97,6 +97,37 @@ class ImageGeneratorService(BaseService):
             return ImageResult.failure(ENGINE_UNAVAILABLE)
         return await engine.run_director_tool(spec)
 
+    async def upscale_image(
+        self,
+        image_b64: str,
+        *,
+        from_command: bool = False,
+    ) -> ImageResult:
+        """执行 4x 图片放大。
+
+        Args:
+            image_b64: 源图 base64
+            from_command: 结果是否保存到命令图片目录
+
+        Returns:
+            执行结果
+        """
+        engine = self.engine
+        if engine is None:
+            return ImageResult.failure(ENGINE_UNAVAILABLE)
+        return await engine.upscale(image_b64, from_command=from_command)
+
+    async def get_user_info(self) -> tuple[bool, str]:
+        """查询账号订阅信息。
+
+        Returns:
+            (是否成功, 面向用户的说明文本)
+        """
+        engine = self.engine
+        if engine is None:
+            return False, ENGINE_UNAVAILABLE
+        return await engine.get_user_info()
+
     def list_selectable_vibes(self) -> tuple[str, ...]:
         """列出当前可供选择的 Vibe 名称。
 

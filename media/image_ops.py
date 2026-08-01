@@ -100,22 +100,29 @@ def downscale_to_free_tier(
 ) -> tuple[str, int, int]:
     """等比缩小图片到免费像素范围，并对齐尺寸粒度。
 
+    NovelAI 要求画幅必须是 64 的倍数，因此即使像素总数未超限，
+    宽高未对齐时也会缩放到最近的对齐尺寸，避免服务端 500。
+
     Args:
         b64_data: 图片 base64
         max_pixels: 像素总数上限
         align: 尺寸对齐粒度
 
     Returns:
-        (缩放后 base64, 宽, 高)；无需缩放时原样返回
+        (缩放后 base64, 宽, 高)；无需处理时原样返回
     """
     clean = strip_data_url_prefix(b64_data)
     raw = base64.b64decode(clean)
     with Image.open(io.BytesIO(raw)) as image:
         width, height = image.size
-        if width * height <= max_pixels:
+        if (
+            width * height <= max_pixels
+            and width % align == 0
+            and height % align == 0
+        ):
             return clean, width, height
 
-        ratio = (max_pixels / (width * height)) ** 0.5
+        ratio = min(1.0, (max_pixels / (width * height)) ** 0.5)
         new_width = max(align, int(width * ratio // align) * align)
         new_height = max(align, int(height * ratio // align) * align)
         while new_width * new_height > max_pixels:
@@ -171,6 +178,9 @@ def fit_for_director_reference(b64_data: str) -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+MASK_BLOCK = 8
+
+
 def build_rect_mask(
     width: int,
     height: int,
@@ -182,6 +192,8 @@ def build_rect_mask(
     """生成局部重绘所需的矩形遮罩。
 
     遮罩为 RGBA PNG，白色不透明区域参与重绘，其余区域保持原图。
+    矩形边界对齐到 8×8 latent 块网格——NovelAI VAE 按 8×8 块处理遮罩，
+    边缘切在块中间会导致该块被半重绘，渲染成灰色锯齿边。
 
     Args:
         width: 目标图片宽度
@@ -195,10 +207,19 @@ def build_rect_mask(
         遮罩 PNG 的 base64
     """
     mask = Image.new("RGBA", (width, height), (0, 0, 0, 255))
-    left = int(width * x_ratio)
-    top = int(height * y_ratio)
-    right = min(width, left + int(width * width_ratio))
-    bottom = min(height, top + int(height * height_ratio))
+    # 左上角向下取整、右下角向上取整到 8px 块边界，保证选区完整覆盖且块对齐。
+    left = int(width * x_ratio) // MASK_BLOCK * MASK_BLOCK
+    top = int(height * y_ratio) // MASK_BLOCK * MASK_BLOCK
+    right = min(
+        width,
+        -(-(int(width * x_ratio) + int(width * width_ratio)) // MASK_BLOCK)
+        * MASK_BLOCK,
+    )
+    bottom = min(
+        height,
+        -(-(int(height * y_ratio) + int(height * height_ratio)) // MASK_BLOCK)
+        * MASK_BLOCK,
+    )
     if right > left and bottom > top:
         region = Image.new("RGBA", (right - left, bottom - top), (255, 255, 255, 255))
         mask.paste(region, (left, top))

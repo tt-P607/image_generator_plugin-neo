@@ -46,6 +46,23 @@ def test_official_urls_derive_from_base_url() -> None:
     assert settings.official_generate_url.endswith("/ai/generate-image")
     assert settings.official_encode_vibe_url.endswith("/ai/encode-vibe")
     assert settings.official_augment_url.endswith("/ai/augment-image")
+    assert settings.official_upscale_url.endswith("/ai/upscale")
+    assert settings.official_subscription_url.endswith("/user/subscription")
+
+
+def test_upscale_payloads_match_channel_protocols() -> None:
+    """验证 upscale 请求体：official 固定 scale=4，gateway 带 response_format。"""
+
+    official = payload_builder.build_official_upscale("img", 512, 512)
+    assert official == {"image": "img", "width": 512, "height": 512, "scale": 4}
+
+    gateway = payload_builder.build_gateway_upscale("img", 512, 512)
+    assert gateway == {
+        "image": "img",
+        "width": 512,
+        "height": 512,
+        "response_format": "b64_json",
+    }
 
 
 def test_output_dir_switches_by_source() -> None:

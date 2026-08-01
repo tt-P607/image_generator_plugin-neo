@@ -294,6 +294,35 @@ class NovelAIHttpClient:
             raise ApiRequestError(200, "响应不是二进制数据")
         return result
 
+    async def get_json(
+        self,
+        url: str,
+        api_key: str,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """GET 请求并解析 JSON 响应。
+
+        Args:
+            url: 请求地址
+            api_key: NovelAI API Key
+            timeout: 超时秒数
+
+        Returns:
+            已解析的响应对象
+        """
+        result = await self._request(
+            "GET",
+            url,
+            headers=self.auth_headers(api_key),
+            payload=None,
+            timeout=timeout,
+            read_binary=False,
+        )
+        if not isinstance(result, dict):
+            raise ApiRequestError(200, "响应不是 JSON 对象")
+        return result
+
     async def get_binary(
         self,
         url: str,

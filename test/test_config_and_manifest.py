@@ -36,7 +36,7 @@ def test_manifest_declares_all_components() -> None:
         (item["component_type"], item["component_name"]) for item in manifest["include"]
     }
     assert ("command", "nai_ref") in declared
-    assert sum(kind == "action" for kind, _ in declared) == 8
+    assert sum(kind == "action" for kind, _ in declared) == 9
     assert sum(kind == "command" for kind, _ in declared) == 4
     assert sum(kind == "service" for kind, _ in declared) == 1
     assert sum(kind == "router" for kind, _ in declared) == 1

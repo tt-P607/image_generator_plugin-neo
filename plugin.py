@@ -18,6 +18,7 @@ from .actions import (
     ColorizeAction,
     DeclutterAction,
     DrawAction,
+    EditImageAction,
     EmotionAction,
     InpaintAction,
     LineartAction,
@@ -162,6 +163,8 @@ class ImageGeneratorPlugin(BasePlugin):
             components.append(DrawAction)
             if config.components.inpaint_action_enabled:
                 components.append(InpaintAction)
+            if config.components.edit_action_enabled:
+                components.append(EditImageAction)
             components.extend(
                 action
                 for flag, action in DIRECTOR_ACTIONS

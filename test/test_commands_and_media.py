@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import io
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from PIL import Image, PngImagePlugin
 
@@ -11,7 +13,7 @@ from image_generator_plugin_neo.commands import parsing
 from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
 from image_generator_plugin_neo.descriptions import build_draw_description
 from image_generator_plugin_neo.engine import storage
-from image_generator_plugin_neo.media import image_ops
+from image_generator_plugin_neo.media import extract_image_by_media_id, image_ops
 
 
 def encode_png(image: Image.Image) -> str:
@@ -106,6 +108,15 @@ def test_downscale_aligns_to_64_within_budget() -> None:
     assert width * height <= image_ops.FREE_TIER_MAX_PIXELS
 
 
+def test_downscale_aligns_unaligned_image_under_limit() -> None:
+    """验证像素未超限但宽高未对齐 64 的图片也会被对齐（500 根因）。"""
+
+    encoded = encode_png(Image.new("RGB", (1080, 508), (0, 0, 0)))
+    _, width, height = image_ops.downscale_to_free_tier(encoded)
+    assert width % 64 == 0 and height % 64 == 0
+    assert width * height <= image_ops.FREE_TIER_MAX_PIXELS
+
+
 def test_director_reference_is_padded_to_required_size() -> None:
     """验证精密参考图会被填充到 API 要求的 1024x1536。"""
 
@@ -123,6 +134,28 @@ def test_rect_mask_marks_only_selected_region() -> None:
     with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as mask:
         assert mask.getpixel((10, 50)) == (0, 0, 0, 255)
         assert mask.getpixel((75, 50)) == (255, 255, 255, 255)
+
+
+def test_rect_mask_aligns_to_latent_blocks() -> None:
+    """验证遮罩边界对齐 8×8 latent 块，避免半重绘块产生灰色锯齿边。"""
+
+    import base64
+
+    # 0.33 比例在 832 宽下取整为 274，不是 8 的倍数，需对齐。
+    mask_b64 = image_ops.build_rect_mask(832, 1216, 0.33, 0.33, 0.33, 0.33)
+    with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as mask:
+        pixels = mask.convert("L")
+        white_columns = [
+            x for x in range(mask.width) if pixels.getpixel((x, mask.height // 2)) > 127
+        ]
+        white_rows = [
+            y for y in range(mask.height) if pixels.getpixel((mask.width // 2, y)) > 127
+        ]
+        assert white_columns and white_rows
+        assert white_columns[0] % 8 == 0
+        assert (white_columns[-1] + 1) % 8 == 0
+        assert white_rows[0] % 8 == 0
+        assert (white_rows[-1] + 1) % 8 == 0
 
 
 def test_rename_with_stem_avoids_overwriting(tmp_path: Path) -> None:
@@ -164,3 +197,64 @@ def test_draw_description_hides_skip_hint_when_forced() -> None:
     config.generation.style_reference = "anime style"
     config.generation.allow_skip_style = False
     assert "不可跳过" in build_draw_description(config)
+
+
+# ─── media_id 精确取图测试 ───
+
+
+async def test_extract_image_by_media_id_reads_cached_file(tmp_path: Path) -> None:
+    """验证 media_id 命中媒体库时能读取文件并返回 base64。"""
+
+    image_bytes = b"\x89PNG\r\n\x1a\nfakedata"
+    image_file = tmp_path / "cached.png"
+    image_file.write_bytes(image_bytes)
+    expected_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    mock_get_media_info = AsyncMock(return_value={"path": str(image_file)})
+    with patch(
+        "image_generator_plugin_neo.media.message_images.get_media_info",
+        mock_get_media_info,
+    ):
+        result = await extract_image_by_media_id("abc123")
+    assert result == expected_b64
+    mock_get_media_info.assert_awaited_once_with("abc123")
+
+
+async def test_extract_image_by_media_id_returns_none_when_not_found() -> None:
+    """验证 media_id 未命中媒体库时返回 None。"""
+
+    mock_get_media_info = AsyncMock(return_value=None)
+    with patch(
+        "image_generator_plugin_neo.media.message_images.get_media_info",
+        mock_get_media_info,
+    ):
+        result = await extract_image_by_media_id("nonexistent")
+    assert result is None
+
+
+async def test_extract_image_by_media_id_returns_none_when_file_missing(
+    tmp_path: Path,
+) -> None:
+    """验证 media_id 有记录但文件不存在时返回 None。"""
+
+    mock_get_media_info = AsyncMock(
+        return_value={"path": str(tmp_path / "ghost.png")}
+    )
+    with patch(
+        "image_generator_plugin_neo.media.message_images.get_media_info",
+        mock_get_media_info,
+    ):
+        result = await extract_image_by_media_id("abc456")
+    assert result is None
+
+
+async def test_extract_image_by_media_id_returns_none_when_no_path() -> None:
+    """验证 media_id 记录中无 path 字段时返回 None。"""
+
+    mock_get_media_info = AsyncMock(return_value={"path": ""})
+    with patch(
+        "image_generator_plugin_neo.media.message_images.get_media_info",
+        mock_get_media_info,
+    ):
+        result = await extract_image_by_media_id("abc789")
+    assert result is None
