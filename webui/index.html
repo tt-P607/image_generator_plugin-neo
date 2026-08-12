@@ -197,7 +197,17 @@ select option { background: var(--panel); }
       <div class="section-head"><h2>生图参数</h2></div>
       <div class="grid-3" style="margin-bottom:12px">
         <div><label>模型</label><input type="text" id="cfgModel" /></div>
-        <div><label>采样器</label><input type="text" id="cfgSampler" /></div>
+        <div><label>采样器</label><select id="cfgSampler">
+          <option value="k_euler_ancestral">k_euler_ancestral (推荐)</option>
+          <option value="k_euler">k_euler</option>
+          <option value="k_dpm_2">k_dpm_2</option>
+          <option value="k_dpm_2_ancestral">k_dpm_2_ancestral</option>
+          <option value="k_dpmpp_2m">k_dpmpp_2m</option>
+          <option value="k_dpmpp_2m_sde">k_dpmpp_2m_sde</option>
+          <option value="k_dpmpp_2s_ancestral">k_dpmpp_2s_ancestral</option>
+          <option value="k_dpmpp_sde">k_dpmpp_sde</option>
+          <option value="ddim">ddim</option>
+        </select></div>
         <div><label>噪声调度</label><select id="cfgNoiseSchedule">
           <option value="karras">karras</option><option value="native">native</option>
           <option value="exponential">exponential</option><option value="polyexponential">polyexponential</option>
@@ -537,7 +547,7 @@ document.getElementById('cfgReloadBtn').addEventListener('click', loadConfig);
 
 function collectConfig() {
   const g = {
-    model: v('cfgModel'), sampler: v('cfgSampler'), noiseSchedule: sel('cfgNoiseSchedule'),
+    model: v('cfgModel'), sampler: sel('cfgSampler'), noiseSchedule: sel('cfgNoiseSchedule'),
     resolution: sel('cfgResolution'), steps: intv('cfgSteps'), scale: floatv('cfgScale'),
     promptGuidanceRescale: floatv('cfgPromptRescale'), ucPreset: intv('cfgUcPreset'),
     varietyPlus: sel('cfgVarietyPlus')==='true', styleReference: v('cfgStyleReference'),

@@ -94,6 +94,11 @@ class InpaintAction(BaseImageAction):
             "填写后从产图目录加载该图片进行局部重绘，无需引用消息。"
             "处理用户发送的图片时留空，改用 media_id。",
         ] = "",
+        output_filename: Annotated[
+            str,
+            "输出文件名（不含扩展名，仅英文/数字/下划线）。"
+            "留空则使用随机文件名。",
+        ] = "",
     ) -> tuple[bool, str]:
         """执行局部重绘。"""
         engine = self.engine
@@ -153,6 +158,7 @@ class InpaintAction(BaseImageAction):
             purpose="action_inpaint",
             success_message="[内部：已发送局部重绘图片]",
             error_prefix="局部重绘失败",
+            output_filename=output_filename,
         )
 
 

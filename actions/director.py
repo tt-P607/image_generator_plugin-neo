@@ -64,6 +64,11 @@ class BaseDirectorAction(BaseImageAction):
             int,
             "去模糊强度 0-5，默认 0。仅上色与改表情工具有效。",
         ] = 0,
+        output_filename: Annotated[
+            str,
+            "输出文件名（不含扩展名，仅英文/数字/下划线）。"
+            "留空则使用随机文件名。",
+        ] = "",
     ) -> tuple[bool, str]:
         """执行导演工具处理。"""
         engine = self.engine
@@ -112,6 +117,7 @@ class BaseDirectorAction(BaseImageAction):
             purpose=f"action_director_{self.tool_type}",
             success_message=f"[内部：已发送{self.tool_display}结果]",
             error_prefix=f"{self.tool_display}失败",
+            output_filename=output_filename,
         )
 
 

@@ -28,11 +28,13 @@ class VibeAsset:
         data: NovelAI encode-vibe 产出的向量 base64
         information_extracted: 信息提取量（0.0–1.0）
         strength: 参考强度（0.0–1.0）
+        name: 来源文件名（不含后缀），用于日志与状态展示
     """
 
     data: str
     information_extracted: float
     strength: float
+    name: str = ""
 
 
 @dataclass(frozen=True, slots=True)

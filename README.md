@@ -72,6 +72,29 @@ prompt_guidance_rescale = 0.0
 | 人物竖图 | `832x1216` |
 | 风景横图 | `1216x832` |
 
+可选采样器：
+
+| 采样器 ID | 说明 |
+|-----------|------|
+| `k_euler` | Euler |
+| `k_euler_ancestral` | Euler Ancestral（默认，推荐） |
+| `k_dpm_2` | DPM2 |
+| `k_dpm_2_ancestral` | DPM2 Ancestral |
+| `k_dpmpp_2m` | DPM++ 2M |
+| `k_dpmpp_2m_sde` | DPM++ 2M SDE |
+| `k_dpmpp_2s_ancestral` | DPM++ 2S Ancestral |
+| `k_dpmpp_sde` | DPM++ SDE |
+| `ddim` | DDIM |
+
+可选噪声调度：
+
+| 调度 ID | 说明 |
+|---------|------|
+| `karras` | Karras（默认，V4 推荐） |
+| `exponential` | Exponential |
+| `polyexponential` | Polyexponential |
+| `native` | Native（仅 V3 模型，插件自动切换） |
+
 ### 角色外观与画风
 
 - `generation.character_prompt`：描述机器人自己的外观，适合自拍或画自己。

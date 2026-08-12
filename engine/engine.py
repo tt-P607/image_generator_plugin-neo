@@ -294,6 +294,7 @@ class ImageEngine:
 
         target_dir = self._settings.output_dir(spec.from_command)
         vibes = self._collect_vibes(spec)
+        self._log_generation(spec, vibes)
 
         if self._settings.is_gateway:
             return await self._run_gateway_generate(spec, vibes, api_key, target_dir)
@@ -310,6 +311,65 @@ class ImageEngine:
             api_key,
         )
         return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
+
+    def _log_generation(
+        self,
+        spec: GenerationSpec,
+        vibes: tuple[VibeAsset, ...],
+    ) -> None:
+        """输出一次生图的完整可读摘要日志。
+
+        按实际用到的内容组织：功能、画幅、模型与核心参数、正面/负面提示词、
+        注入的 Vibe 与精密参考。只展示本次生效的项，避免冗余。
+
+        Args:
+            spec: 生图请求描述
+            vibes: 本次实际注入的 Vibe（already 收集完成）
+        """
+        tags: list[str] = []
+        if spec.is_img2img:
+            tags.append("图生图")
+        elif spec.characters:
+            tags.append("多人物")
+        else:
+            tags.append("文生图")
+
+        features: list[str] = []
+        if spec.director_refs:
+            features.append(
+                "参考="
+                + ", ".join(
+                    f"{ref.ref_type}({ref.strength:.2f})" for ref in spec.director_refs
+                )
+            )
+        if vibes:
+            features.append(
+                "Vibe="
+                + ", ".join(
+                    f"{vibe.name or '未命名'}(Str:{vibe.strength:.2f},IE:{vibe.information_extracted:.2f})"
+                    for vibe in vibes
+                )
+            )
+        if spec.characters:
+            features.append(f"角色={len(spec.characters)}")
+
+        params = (
+            f"{spec.width}x{spec.height} | {self._settings.model} | "
+            f"steps={self._settings.steps} | scale={spec.scale if spec.scale is not None else self._settings.scale} | "
+            f"rescale={spec.cfg_rescale if spec.cfg_rescale is not None else self._settings.cfg_rescale} | "
+            f"sampler={self._settings.sampler}"
+        )
+
+        lines = [
+            f"生图开始 [{', '.join(tags)}]",
+            f"  参数: {params}",
+        ]
+        if features:
+            lines.append(f"  功能: {', '.join(features)}")
+        lines.append(f"  正面: {spec.prompt}")
+        if spec.negative_prompt:
+            lines.append(f"  负面: {spec.negative_prompt}")
+        logger.info("\n".join(lines))
 
     async def _run_gateway_generate(
         self,
@@ -456,6 +516,11 @@ class ImageEngine:
         if self._settings.vibe_selectable_enabled and spec.selected_vibe_names:
             collected.extend(self._assets.select_vibes(spec.selected_vibe_names))
         collected.extend(self._user_vibes.get(spec.user_id))
+        if collected:
+            logger.info(
+                "本次注入 Vibe: "
+                + ", ".join(f"{asset.name or '未命名'}" for asset in collected)
+            )
         return tuple(collected)
 
     async def _save_gateway_response(
@@ -574,7 +639,8 @@ class ImageEngine:
 
         lines = [f"当前已加载 {len(loaded)} 个 Vibe:"]
         lines.extend(
-            f"{index}. IE:{asset.information_extracted}, Str:{asset.strength}"
+            f"{index}. {asset.name or '未命名'} | IE:{asset.information_extracted}, "
+            f"Str:{asset.strength}"
             for index, asset in enumerate(loaded, start=1)
         )
         return "\n".join(lines)
@@ -640,6 +706,7 @@ class ImageEngine:
             data=vector,
             information_extracted=DEFAULT_MANUAL_VIBE_IE,
             strength=DEFAULT_MANUAL_VIBE_STRENGTH,
+            name=Path(resolved).stem,
         )
         added, count = self._user_vibes.add(user_id, asset, self._settings.max_vibes)
         if not added:

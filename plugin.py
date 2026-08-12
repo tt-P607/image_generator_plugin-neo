@@ -11,6 +11,7 @@ from typing import cast
 from src.app.plugin_system.api.action_api import clear_schema_cache
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BasePlugin, register_plugin
+from src.core.prompt import SystemReminderBucket, SystemReminderInsertType
 from src.kernel.concurrency import get_task_manager
 
 from .actions import (
@@ -40,6 +41,7 @@ logger = get_logger("image_generator_plugin")
 
 PLUGIN_NAME = "image_generator_plugin-neo"
 DRAW_ACTION_SIGNATURE = f"{PLUGIN_NAME}:action:draw_image"
+_RULE_REMINDER_NAME = "image_generator_rule"
 
 DIRECTOR_ACTIONS: tuple[tuple[str, type], ...] = (
     ("director_declutter_enabled", DeclutterAction),
@@ -56,8 +58,6 @@ class ImageGeneratorPlugin(BasePlugin):
     """NovelAI 图片生成插件。"""
 
     plugin_name: str = PLUGIN_NAME
-    plugin_description: str = "基于 NovelAI 官方 API 的 AI 图片生成插件"
-    plugin_version: str = "2.1.0"
 
     configs: list[type] = [ImageGeneratorConfig]
     dependent_components: list[str] = []
@@ -112,15 +112,18 @@ class ImageGeneratorPlugin(BasePlugin):
         await engine.start()
         self.engine = engine
         self._refresh_draw_description(config)
+        self._sync_rule_reminder(config)
         logger.info("ImageGeneratorPlugin 初始化完成")
 
     async def on_plugin_unloaded(self) -> None:
-        """取消后台任务并释放引擎资源。"""
+        """取消后台任务、清理 system reminder 并释放引擎资源。"""
 
         task_manager = get_task_manager()
         for task_id in tuple(self._background_task_ids):
             task_manager.cancel_task(task_id)
         self._background_task_ids.clear()
+
+        self._clear_rule_reminder()
 
         if self.engine is not None:
             await self.engine.close()
@@ -136,6 +139,48 @@ class ImageGeneratorPlugin(BasePlugin):
         if self.engine is not None:
             await self.engine.reload(config)
         self._refresh_draw_description(config)
+        self._sync_rule_reminder(config)
+
+    def _sync_rule_reminder(self, config: ImageGeneratorConfig) -> None:
+        """按配置同步生图规则到 actor system reminder。
+
+        开关开启时把完整生图规则以 DYNAMIC 方式注入 actor bucket，
+        贴近当前轮次输入；关闭时清理注入。
+
+        Args:
+            config: 当前配置实例
+        """
+        from src.core.prompt import get_system_reminder_store
+
+        store = get_system_reminder_store()
+        if not config.prompt.inject_rule_reminder:
+            store.delete(
+                SystemReminderBucket.ACTOR.value,
+                _RULE_REMINDER_NAME,
+            )
+            return
+
+        content = (
+            "【图片生成规则 — 调用 draw_image 时必须严格遵守以下规范】\n"
+            "以下是 NovelAI 生图的核心规则，涵盖标签语法、角色、画幅、"
+            "参考图与内置画风/负面词。每次调用 draw_image 前请按此规则组织参数。\n\n"
+            f"{build_draw_description(config)}"
+        )
+        store.set(
+            SystemReminderBucket.ACTOR.value,
+            name=_RULE_REMINDER_NAME,
+            content=content,
+            insert_type=SystemReminderInsertType.DYNAMIC,
+        )
+        logger.info("已同步生图规则到 actor system reminder")
+
+    def _clear_rule_reminder(self) -> None:
+        """清理插件注入的 actor system reminder。"""
+
+        from src.core.prompt import get_system_reminder_store
+
+        store = get_system_reminder_store()
+        store.delete(SystemReminderBucket.ACTOR.value, _RULE_REMINDER_NAME)
 
     def _refresh_draw_description(self, config: ImageGeneratorConfig) -> None:
         """按配置重建画图 Action 的描述并让 schema 缓存失效。

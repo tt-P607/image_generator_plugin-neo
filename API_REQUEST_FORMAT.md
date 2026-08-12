@@ -513,12 +513,37 @@ POST /v1/images/generations
 |---|---|---|
 | `steps` | `1–50` | 采样步数 |
 | `scale` | `1.0–10.0` | 提示词引导强度 |
+| `sampler` | 见下表 | 采样器 |
+| `noise_schedule` | 见下表 | 噪声调度 |
 | `cfg_rescale` | `0.0–1.0` | CFG 缩放 |
 | `ucPreset` | `0–4` | UC 预设 |
 | `strength` | `0.01–1.0` | 图生图或重绘强度 |
 | `fidelity` | `0.0–1.0` | 精密参考忠实度 |
 | `defry` | `0–5` | 上色或表情工具去噪参数 |
 | `type` | `character` / `style` / `character&style` | 精密参考类型 |
+
+### 采样器
+
+| 采样器 ID | 说明 |
+|-----------|------|
+| `k_euler` | Euler |
+| `k_euler_ancestral` | Euler Ancestral（默认，推荐） |
+| `k_dpm_2` | DPM2 |
+| `k_dpm_2_ancestral` | DPM2 Ancestral |
+| `k_dpmpp_2m` | DPM++ 2M |
+| `k_dpmpp_2m_sde` | DPM++ 2M SDE |
+| `k_dpmpp_2s_ancestral` | DPM++ 2S Ancestral |
+| `k_dpmpp_sde` | DPM++ SDE |
+| `ddim` | DDIM |
+
+### 噪声调度
+
+| 调度 ID | 说明 |
+|---------|------|
+| `karras` | Karras（默认，V4 推荐） |
+| `exponential` | Exponential |
+| `polyexponential` | Polyexponential |
+| `native` | Native（仅 V3 模型使用，插件对 V3 模型自动切换为此调度） |
 
 ## 响应与错误
 

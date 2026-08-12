@@ -87,7 +87,9 @@ class DrawAction(BaseImageAction):
 
         width, height = self.parse_resolution(resolution, DEFAULT_RESOLUTION)
         prompt = self._build_prompt(content_description)
-        logger.info(f"AI 画图 - 提示词: {prompt}, 画幅: {width}x{height}")
+        logger.info(f"AI 画图 - 正面提示词: {prompt} | 画幅: {width}x{height}")
+        if negative_prompt.strip():
+            logger.info(f"AI 画图 - 负面提示词: {negative_prompt}")
 
         spec = GenerationSpec(
             prompt=prompt,

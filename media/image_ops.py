@@ -66,13 +66,24 @@ def read_image_size(b64_data: str) -> tuple[int, int]:
 
 
 def strip_png_metadata(image_bytes: bytes) -> bytes:
-    """剥离 PNG 文本元数据并破坏 Alpha 通道隐写信息。
+    """剥离 NovelAI 生成图片中的全部元数据。
 
-    保留 0/255 透明端点，将中间透明度量化为 16 级，
-    在维持视觉效果的同时破坏 Alpha 低位可能携带的水印数据。
+    NovelAI 的元数据写入两个区域：
+
+    1. **标准 PNG 文本块（tEXt / iTXt）**：包含 Software、Source、Title、Comment
+       等字段，Comment 中以 JSON 存储完整生成参数（提示词、种子、采样器等）。
+       通过清除 Pillow 的 info 字典后重新保存，移除所有文本块。
+
+    2. **Alpha 通道隐写区（Stealth PNGInfo）**：生成参数和模型签名哈希
+       嵌入 Alpha 通道的最低有效位（LSB）中，作为标准文本块被擦除后的
+       容错备份。通过 ``alpha & 0xFE`` 将每个像素 Alpha 通道最低位置 0，
+       彻底清除 LSB 隐写痕迹（prompt + 签名哈希），透明度最大变化仅 1
+       （255→254），人眼不可分辨。
+
+    本地保存的原图不受影响，剥离仅在发送给用户前执行。
 
     Args:
-        image_bytes: 原始图片字节
+        image_bytes: 原始 PNG 字节
 
     Returns:
         清理后的 PNG 字节
@@ -82,12 +93,13 @@ def strip_png_metadata(image_bytes: bytes) -> bytes:
         clean = source.convert("RGBA") if has_alpha else source.convert("RGB")
         if clean.mode == "RGBA":
             red, green, blue, alpha = clean.split()
-            alpha = alpha.point(
-                lambda value: value if value in (0, 255) else round(value / 17) * 17
-            )
+            # alpha & 0xFE 清零最低位，彻底破坏 LSB 隐写，透明度无损。
+            alpha = alpha.point(lambda value: value & 0xFE)
             clean = Image.merge("RGBA", (red, green, blue, alpha))
+        # 清除 tEXt/iTXt/zTXt 块（NovelAI 的 Comment/Source/Software 等）。
         clean.info.clear()
         buffer = io.BytesIO()
+        # optimize=False 防止编码器重新注入辅助信息。
         clean.save(buffer, format="PNG", optimize=False)
         return buffer.getvalue()
 

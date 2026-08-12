@@ -281,3 +281,25 @@ def test_user_vibe_store_respects_limit_and_isolation() -> None:
 
     store.clear("alice")
     assert store.get("alice") == []
+
+
+def test_vibe_asset_carries_optional_name() -> None:
+    """验证 VibeAsset 的 name 字段用于日志展示且可缺省。"""
+
+    unnamed = VibeAsset(data="v", information_extracted=1.0, strength=0.6)
+    named = VibeAsset(
+        data="v",
+        information_extracted=1.0,
+        strength=0.6,
+        name="日系块面厚涂概念插画风",
+    )
+
+    assert unnamed.name == ""
+    assert named.name == "日系块面厚涂概念插画风"
+
+
+def test_rule_reminder_switch_defaults_off() -> None:
+    """验证生图规则注入开关默认关闭。"""
+
+    config = ImageGeneratorConfig()
+    assert config.prompt.inject_rule_reminder is False

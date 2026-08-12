@@ -70,8 +70,8 @@ def test_extract_reference_flags_clamps_values() -> None:
     assert flags.remainder == "1girl"
 
 
-def test_strip_metadata_quantizes_alpha_and_removes_text(tmp_path: Path) -> None:
-    """验证元数据剥离会量化透明度并移除 PNG 文本块。"""
+def test_strip_metadata_clears_alpha_lsb_and_removes_text(tmp_path: Path) -> None:
+    """验证元数据剥离：alpha & 0xFE 清零 LSB + 移除 tEXt/iTXt 文本块。"""
 
     source = tmp_path / "source.png"
     image = Image.new("RGBA", (4, 1))
@@ -86,7 +86,8 @@ def test_strip_metadata_quantizes_alpha_and_removes_text(tmp_path: Path) -> None
     with Image.open(io.BytesIO(stripped)) as output:
         alpha_channel = output.getchannel("A")
         alpha = [alpha_channel.getpixel((x, 0)) for x in range(output.width)]
-        assert alpha == [0, 0, 136, 255]
+        # alpha & 0xFE: 0→0, 1→0, 128→128, 255→254
+        assert alpha == [0, 0, 128, 254]
         assert "Comment" not in output.info
 
 

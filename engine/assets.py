@@ -259,13 +259,15 @@ class AssetLibrary:
                 logger.error(f"加载 Vibe 失败 [{item.file}]: {error}")
                 continue
 
+            name = Path(item.file).stem
             assets.append(
                 (
-                    Path(item.file).stem,
+                    name,
                     VibeAsset(
                         data=vector,
                         information_extracted=item.ie,
                         strength=item.strength,
+                        name=name,
                     ),
                 )
             )

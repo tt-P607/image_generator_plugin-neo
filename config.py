@@ -308,7 +308,10 @@ class ImageGeneratorConfig(BaseConfig):
         )
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
-            description="噪声调度",
+            description=(
+                "噪声调度。可选：karras（默认，V4 推荐）、exponential、"
+                "polyexponential、native（仅 V3 模型，插件自动切换）。"
+            ),
         )
         resolution: Literal["1024x1024", "1216x832", "832x1216"] = Field(
             default="1024x1024",
@@ -326,9 +329,23 @@ class ImageGeneratorConfig(BaseConfig):
             le=10.0,
             description="引导比例",
         )
-        sampler: str = Field(
+        sampler: Literal[
+            "k_euler",
+            "k_euler_ancestral",
+            "k_dpm_2",
+            "k_dpm_2_ancestral",
+            "k_dpmpp_2m",
+            "k_dpmpp_2m_sde",
+            "k_dpmpp_2s_ancestral",
+            "k_dpmpp_sde",
+            "ddim",
+        ] = Field(
             default="k_euler_ancestral",
-            description="采样器",
+            description=(
+                "采样器。可选：k_euler、k_euler_ancestral（默认，推荐）、"
+                "k_dpm_2、k_dpm_2_ancestral、k_dpmpp_2m、k_dpmpp_2m_sde、"
+                "k_dpmpp_2s_ancestral、k_dpmpp_sde、ddim。"
+            ),
         )
         prompt_guidance_rescale: float = Field(
             default=0.0,
@@ -477,8 +494,17 @@ class ImageGeneratorConfig(BaseConfig):
         支持三种方式向模型注入生图指引：
         - custom_instructions：自由文本区块，用户可写任意指引内容
         - presets：结构化预设列表，每条带名称、触发条件、具体内容
+        - inject_rule_reminder：将完整生图规则同步到 actor system reminder
         """
 
+        inject_rule_reminder: bool = Field(
+            default=False,
+            description=(
+                "是否将完整生图规则同步到 actor system reminder。\n"
+                "开启后规则以 DYNAMIC 方式注入 LLM system reminder，贴近当前轮次输入；"
+                "关闭后规则仅在 draw_image Action 的 description 中提供。"
+            ),
+        )
         custom_instructions: str = Field(
             default="",
             description=(
