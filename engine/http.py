@@ -47,9 +47,12 @@ class ApiRequestError(Exception):
 class RetryPolicy:
     """请求重试策略。
 
+    网络重试同时覆盖网络异常（超时 / 连接错误）与可重试的 5xx
+    服务端错误（502 / 503 / 504 等），此类瞬时故障按相同次数与间隔重试。
+
     Attributes:
-        network_attempts: 网络异常时的额外重试次数
-        network_delay: 网络异常重试间隔秒数
+        network_attempts: 网络异常及可重试 5xx 时的额外重试次数
+        network_delay: 上述重试间隔秒数
         rate_limit_attempts: 遭遇 429 时的额外重试次数
         rate_limit_delay: 429 重试间隔秒数
     """
@@ -171,7 +174,7 @@ class NovelAIHttpClient:
 
         Raises:
             RateLimitedError: 429 重试耗尽
-            ApiRequestError: 服务端返回非成功状态码
+            ApiRequestError: 服务端返回不可重试的非成功状态码
             aiohttp.ClientError: 网络重试耗尽后的底层异常
             asyncio.TimeoutError: 超时重试耗尽
         """
@@ -215,7 +218,17 @@ class NovelAIHttpClient:
 
                 raise RateLimitedError("请求频率超限")
 
-            except (RateLimitedError, ApiRequestError):
+            except (RateLimitedError, ApiRequestError) as error:
+                # 可重试的 5xx（如 502/503/504）属服务端瞬时故障，
+                # 与网络异常一样按 network 策略重试，其余错误直接上抛。
+                if isinstance(error, ApiRequestError) and 500 <= error.status <= 599:
+                    if net_attempt < policy.network_attempts:
+                        logger.warning(
+                            f"服务端 {error.status}，{policy.network_delay:.0f}s 后重试 "
+                            f"({net_attempt + 1}/{policy.network_attempts}): {error.detail}"
+                        )
+                        await asyncio.sleep(policy.network_delay)
+                        continue
                 raise
             except (asyncio.TimeoutError, aiohttp.ClientError) as error:
                 last_error = error
