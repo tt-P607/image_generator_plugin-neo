@@ -1,8 +1,8 @@
 """画图 Action 描述文本构建。
 
-画图能力的可用画风、预设、参考图都来自用户配置，需要在插件加载时
-拼进 Action description 让模型看到。本模块只负责生成文本，
-不修改任何全局状态。
+画图能力的可用画风、预设、参考图及底层生图模型都来自用户配置，
+在插件加载或配置热重载时自动检测当前生效模型，并动态组装专属提示词规范
+注入到 Action description 和 System Reminder，让模型明确感知当前模型与专属语法。
 """
 
 from __future__ import annotations
@@ -10,53 +10,191 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import ImageGeneratorConfig
+from .engine.types import V3_MODELS, V4_MODELS, V5_MODELS
 
-BASE_DRAW_DESCRIPTION = (
-    "**1. 基础结构**\n"
-    "提示词必须为英文、半角逗号分隔的标签式结构。越靠前权重越高。\n"
-    "推荐顺序：风格 → 人数/性别 → 角色身份 → 身体特征 → "
-    "服装配饰 → 动作表情 → 环境背景 → 光影视角\n\n"
-    "**2. 权重语法（NovelAI 冒号语法）**\n"
-    "  提升：n::Tag::（推荐 n=1.1~1.4）\n"
-    "  降低：n::Tag::（推荐 n=0.6~0.9）\n"
-    "  旧版：{Tag} ≈x1.1，[Tag] ≈x0.9，建议弃用\n"
-    "  注意：以数字结尾的词条末尾需加空格或下划线，否则权重会影响后续词条\n\n"
-    "**3. 角色与皮肤标签**\n"
-    "  角色：角色名 (作品名)，如 Castorice (honkai: star rail)\n"
-    "  皮肤：角色名_(皮肤名)_(作品名)，如 Hu_Tao_(Cherries_Snow-Laden)_(genshin_impact)\n"
-    "  游戏 CG 风格：1.2::game_name (game cg)::\n"
-    "  大小写不敏感，特殊符号需还原\n\n"
-    "**4. 画面文字**\n"
-    "  语法：TEXT: 要显示的文字（TEXT 大写）\n"
-    "  可多次使用，配合 speech bubble 实现漫画效果\n\n"
-    "**5. 多角色与位置控制**\n"
-    "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
-    "  - prompt：该角色英文标签（必填）\n"
-    "  - uc：角色专属负面词（可省略）\n"
-    "  - x：水平 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
-    "  - y：垂直 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
-    '示例：[{"prompt":"1girl, blonde hair","x":0.3,"y":0.5},'
-    '{"prompt":"1girl, black hair","x":0.7,"y":0.5}]\n\n'
-    "**6. 互动标签**\n"
-    "  施动方：source#动作（如 source#hugging）\n"
-    "  受动方：target#动作（如 target#hugging）\n"
-    "  相互：mutual#动作（如 mutual#holding hands）\n"
-    "  规则：source/target 必须成对出现在不同角色上；"
-    "不要在 content_description 重复互动动作；"
-    "同一对不能同时用 source# 和 mutual#\n\n"
-    "**7. 精确参考 (Director Reference)**\n"
-    "使用 selected_director_refs 参数，填入要使用的参考图名称（逗号分隔）。\n"
-    "可用名称由系统在上下文中提供，不在列表中的名称无效。\n\n"
-    "**注意事项**\n"
-    "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
-    "  - 单人物不要传 characters，留空即可\n"
-    "  - 仅 V4 系列模型支持多人物和精确参考\n\n"
-    "**画幅**：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024\n\n"
-    "**文件名规范**（output_filename，必填）：\n"
-    "  每次出图必须指定文件名，仅英文/数字/下划线，不含扩展名。\n"
-    "  命名建议：内容描述_序号，如 character_portrait_01、landscape_sunset_02。\n"
-    "  出图成功后返回值包含实际文件名，后续 inpaint_image / director_tool "
-    "可通过 image_filename 引用。"
+
+def detect_model_generation(model: str) -> str:
+    """根据固定的确切模型名称判定 NovelAI 模型代际（绝对匹配）。
+
+    Args:
+        model: 精确模型名，如 'nai-diffusion-5-curated'
+
+    Returns:
+        'v5' | 'v4' | 'v3'
+    """
+    cleaned = model.strip()
+    if cleaned in V5_MODELS:
+        return "v5"
+    if cleaned in V4_MODELS:
+        return "v4"
+    if cleaned in V3_MODELS:
+        return "v3"
+    return "v5"
+
+
+def _model_header_block(config: ImageGeneratorConfig) -> str:
+    """构建当前生效生图模型声明头。"""
+    model = config.generation.model.strip() or "nai-diffusion-5-curated"
+    generation = detect_model_generation(model)
+    gen_title = {
+        "v5": "NovelAI V5 架构",
+        "v4": "NovelAI V4 / V4.5 架构",
+        "v3": "NovelAI V3 架构",
+    }.get(generation, "NovelAI 最新架构")
+
+    return (
+        f"【当前生效生图模型】\n"
+        f"  模型名称：`{model}`（{gen_title}）\n"
+        f"  请严格按照该模型对应的专属语法与特性构建提示词。"
+    )
+
+
+def _base_structure_block() -> str:
+    """构建通用的基础结构与冒号加权说明。"""
+    return (
+        "**1. 基础结构与分层排布**\n"
+        "提示词以半角逗号分隔的英文标签为主，越靠前对画面基调与构图的影响权重越高。\n"
+        "推荐九维分层顺序：\n"
+        "  1.品质画风 → 2.人数性别 → 3.角色身份 → 4.身体容貌 → "
+        "5.服装配饰 → 6.动作表情 → 7.环境背景 → 8.光影构图 → 9.渲染质感\n\n"
+        "**2. 权重语法（NovelAI 冒号语法）**\n"
+        "  - 提升权重：n::Tag::（推荐 n=1.1~1.4，如 1.3::silver hair::）\n"
+        "  - 降低权重：n::Tag::（推荐 n=0.6~0.9，如 0.8::blurry background::）\n"
+        "  - 注意：以数字结尾的词条末尾加空格或下划线（如 1.2::2000s _::），防止权重解析粘连"
+    )
+
+
+def _character_naming_block() -> str:
+    """构建通用的 Danbooru 角色与皮肤命名规范。"""
+    return (
+        "**3. 角色与皮肤标签规范**\n"
+        "  - 角色标准名：角色名 (作品名)，如 Castorice (honkai: star rail)\n"
+        "  - 官方皮肤/形态：角色名_(皮肤名)_(作品名)，如 Hu_Tao_(Cherries_Snow-Laden)_(genshin_impact)\n"
+        "  - 游戏 CG 原画风格：1.2::game_name (game cg)::\n"
+        "  - 大小写不敏感，下划线与括号需按标准拼写"
+    )
+
+
+def _model_specific_prompt_block(config: ImageGeneratorConfig) -> str:
+    """根据当前模型代际动态生成专属的提示词与文字生成语法。"""
+    generation = detect_model_generation(config.generation.model)
+
+    if generation == "v5":
+        return (
+            "**4. V5 模型专属特性与文字生成**\n"
+            "  - 多语言画面文字绘制（V5 核心特性）：\n"
+            "    直接使用半角双引号 \"\" 或中文全角引号 “” 包裹想要呈现的文字，可结合自然语言描述载体与位置。\n"
+            "    * 对话框文字：green speech bubble that says: “你好，世界！”\n"
+            "    * 霓虹灯与招牌：neon street sign with text: \"NOVELAI V5\"\n"
+            "    * 横幅与标语：wooden storefront banner writing: “深夜食堂”\n"
+            "  - 自然语言融合与光影：\n"
+            "    V5 模型对自然语言长句与修饰词理解能力更强，可直接融入丰富的光影描绘（如 volumetric lighting, cinematic lighting, soft warm sunlight filtering through window）。\n"
+            "  - 推荐画风品质基调词：\n"
+            "    masterpiece, best quality, very aesthetic, official art\n"
+            "  - 参考图支持：\n"
+            "    V5 模型依靠自身强大的提示词语义与原生 Tag 解析能力，不使用且不支持 Vibe 风格参考与 Director 角色参考图（无需填写 selected_vibes 与 selected_director_refs）。"
+        )
+    elif generation == "v4":
+        return (
+            "**4. V4/V4.5 模型专属特性与文字生成**\n"
+            "  - 画面文字生成：\n"
+            "    必须使用 TEXT: 语法，并配合 speech bubble 等载体标签。\n"
+            "    * 示例：speech bubble, TEXT: Hello World\n"
+            "  - 标签密集堆叠：\n"
+            "    V4/V4.5 侧重标准的 Danbooru Tag 密集组合，对复杂从句容忍度较低，建议将修饰词拆解为独立英文标签。\n"
+            "  - 推荐画风品质基调词：\n"
+            "    masterpiece, best quality, ultra detailed, 1.2::ultra-detailed CG::\n"
+            "  - 参考图支持：\n"
+            "    支持 Vibe 风格参考图（selected_vibes）与 Director 角色精确参考图（selected_director_refs）。"
+        )
+    else:
+        return (
+            "**4. V3 模型专属特性**\n"
+            "  - 纯文本标签：仅支持单角色纯文本 prompt 与 negative_prompt，不支持结构化多角色坐标。\n"
+            "  - 推荐画风品质基调词：\n"
+            "    masterpiece, best quality, highly detailed"
+        )
+
+
+def _multi_character_block(config: ImageGeneratorConfig) -> str:
+    """构建多角色与互动说明。"""
+    generation = detect_model_generation(config.generation.model)
+    if generation == "v3":
+        return (
+            "**5. 人物控制**\n"
+            "当前 V3 模型仅支持单人物生成，请在 content_description 中直接书写角色与环境标签。"
+        )
+
+    return (
+        "**5. 多角色与位置控制（5×5 网格坐标系）**\n"
+        "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
+        "  - prompt：该角色英文专属标签（必填，包括发型、眼睛、服装、专属动作）\n"
+        "  - uc：角色专属负面词（可省略）\n"
+        "  - x：水平 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
+        "  - y：垂直 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
+        '示例：[{"prompt":"1girl, blonde hair, white dress","x":0.3,"y":0.5},'
+        '{"prompt":"1girl, black hair, blue dress","x":0.7,"y":0.5}]\n\n'
+        "**6. 角色互动语法（Interaction Tags）**\n"
+        "  - 施动方：source#动作（如 source#hugging，填在发起角色的 prompt）\n"
+        "  - 受动方：target#动作（如 target#hugging，填在接受角色的 prompt）\n"
+        "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
+        "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
+        "**注意事项**\n"
+        "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
+        "  - 单人物生图时不要传 characters，留空即可"
+    )
+
+
+def _composition_and_filename_block() -> str:
+    """构建画幅与文件名规范。"""
+    return (
+        "**7. 构图画幅与文件命名**\n"
+        "  - 画幅尺寸：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024\n"
+        "  - 文件名规范（output_filename，必填）：\n"
+        "    每次出图必须指定文件名，仅英文/数字/下划线，不含扩展名。\n"
+        "    命名建议：内容描述_序号，如 character_portrait_01、landscape_sunset_02。\n"
+        "    出图成功后返回值包含实际文件名，后续 inpaint_image / director_tool 可通过此文件名引用。"
+    )
+
+
+# 默认基础描述（展示 V5 架构），供静态引用
+BASE_DRAW_DESCRIPTION = "\n\n".join(
+    [
+        "【当前生效生图模型】\n  模型名称：`nai-diffusion-5-curated`（NovelAI V5 架构）\n  请严格按照该模型对应的专属语法与特性构建提示词。",
+        _base_structure_block(),
+        _character_naming_block(),
+        (
+            "**4. V5 模型专属特性与文字生成**\n"
+            "  - 多语言画面文字绘制（V5 核心特性）：\n"
+            "    直接使用半角双引号 \"\" 或中文全角引号 “” 包裹想要呈现的文字，可结合自然语言描述载体与位置。\n"
+            "    * 对话框文字：green speech bubble that says: “你好，世界！”\n"
+            "    * 霓虹灯与招牌：neon street sign with text: \"NOVELAI V5\"\n"
+            "    * 横幅与标语：wooden storefront banner writing: “深夜食堂”\n"
+            "  - 自然语言融合与光影：\n"
+            "    V5 模型对自然语言长句与修饰词理解能力更强，可直接融入丰富的光影描绘（如 volumetric lighting, cinematic lighting, soft warm sunlight filtering through window）。\n"
+            "  - 推荐画风品质基调词：\n"
+            "    masterpiece, best quality, very aesthetic, official art"
+        ),
+        (
+            "**5. 多角色与位置控制（5×5 网格坐标系）**\n"
+            "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
+            "  - prompt：该角色英文专属标签（必填，包括发型、眼睛、服装、专属动作）\n"
+            "  - uc：角色专属负面词（可省略）\n"
+            "  - x：水平 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
+            "  - y：垂直 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
+            '示例：[{"prompt":"1girl, blonde hair, white dress","x":0.3,"y":0.5},'
+            '{"prompt":"1girl, black hair, blue dress","x":0.7,"y":0.5}]\n\n'
+            "**6. 角色互动语法（Interaction Tags）**\n"
+            "  - 施动方：source#动作（如 source#hugging，填在发起角色的 prompt）\n"
+            "  - 受动方：target#动作（如 target#hugging，填在接受角色的 prompt）\n"
+            "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
+            "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
+            "**注意事项**\n"
+            "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
+            "  - 单人物生图时不要传 characters，留空即可"
+        ),
+        _composition_and_filename_block(),
+    ]
 )
 
 SKIP_STYLE_HINT = (
@@ -123,7 +261,8 @@ def _custom_block(config: ImageGeneratorConfig) -> str:
 def _vibe_block(config: ImageGeneratorConfig) -> str:
     """构建可选 Vibe 列表块。"""
 
-    if not config.vibe.selectable_enabled or not config.vibe.selectable:
+    generation = detect_model_generation(config.generation.model)
+    if generation == "v5" or not config.vibe.selectable_enabled or not config.vibe.selectable:
         return ""
 
     lines = [
@@ -139,7 +278,10 @@ def _director_ref_block(config: ImageGeneratorConfig) -> str:
     """构建可选精密参考列表块。"""
 
     reference = config.director_reference
-    if not (reference.enabled and reference.selectable_enabled and reference.selectable):
+    generation = detect_model_generation(config.generation.model)
+    if generation == "v5" or not (
+        reference.enabled and reference.selectable_enabled and reference.selectable
+    ):
         return ""
 
     lines = [
@@ -154,9 +296,9 @@ def _director_ref_block(config: ImageGeneratorConfig) -> str:
 
 
 def build_draw_description(config: ImageGeneratorConfig) -> str:
-    """按当前配置生成画图 Action 的完整描述。
+    """按当前配置动态检测模型并生成画图 Action 的完整专属描述。
 
-    每次都从固定基础文本重建，保证配置热重载后不会叠加历史内容。
+    每次都按当前 config.generation.model 动态重建，注入当前模型标识与专属语法。
 
     Args:
         config: 已校验的插件配置实例
@@ -165,7 +307,12 @@ def build_draw_description(config: ImageGeneratorConfig) -> str:
         画图 Action 的 description 文本
     """
     blocks = [
-        BASE_DRAW_DESCRIPTION,
+        _model_header_block(config),
+        _base_structure_block(),
+        _character_naming_block(),
+        _model_specific_prompt_block(config),
+        _multi_character_block(config),
+        _composition_and_filename_block(),
         _style_block(config),
         _negative_block(config),
         _character_block(config),

@@ -200,6 +200,61 @@ def test_draw_description_hides_skip_hint_when_forced() -> None:
     assert "不可跳过" in build_draw_description(config)
 
 
+def test_draw_description_detects_and_injects_v5_model() -> None:
+    """验证 V5 模型时自动注入模型名与 V5 专属规范，且不暴露 Vibe/精密参考列表。"""
+
+    from image_generator_plugin_neo.config import DirectorReferenceItemConfig, VibeItemConfig
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-curated"
+    config.vibe.selectable_enabled = True
+    config.vibe.selectable = [
+        VibeItemConfig(file="test_vibe.png", description="测试画风")
+    ]
+    config.director_reference.enabled = True
+    config.director_reference.selectable_enabled = True
+    config.director_reference.selectable = [
+        DirectorReferenceItemConfig(file="test_ref.png", description="测试参考")
+    ]
+    desc = build_draw_description(config)
+
+    assert "【当前生效生图模型】" in desc
+    assert "nai-diffusion-5-curated" in desc
+    assert "NovelAI V5 架构" in desc
+    assert "“你好，世界！”" in desc
+    assert "TEXT:" not in desc
+    # 验证 V5 架构下不向 LLM 暴露 Vibe 与精密参考列表
+    assert "【可选 Vibe 画风列表" not in desc
+    assert "【可用精密参考列表" not in desc
+
+
+def test_draw_description_detects_and_injects_v4_model() -> None:
+    """验证 V4/V4.5 模型时自动注入模型名与 V4.5 专属 TEXT: 语法。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-4-5-full"
+    desc = build_draw_description(config)
+
+    assert "【当前生效生图模型】" in desc
+    assert "nai-diffusion-4-5-full" in desc
+    assert "NovelAI V4 / V4.5 架构" in desc
+    assert "TEXT:" in desc
+    assert "“你好，世界！”" not in desc
+
+
+def test_draw_description_detects_and_injects_v3_model() -> None:
+    """验证 V3 模型时自动注入模型名与 V3 纯文本规范。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-3"
+    desc = build_draw_description(config)
+
+    assert "【当前生效生图模型】" in desc
+    assert "nai-diffusion-3" in desc
+    assert "NovelAI V3 架构" in desc
+    assert "纯文本标签" in desc
+
+
 # ─── media_id 精确取图测试 ───
 
 

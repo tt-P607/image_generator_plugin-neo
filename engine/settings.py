@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ImageGeneratorConfig
+from .types import V4_MODELS, V5_MODELS
 
 OFFICIAL_GENERATE_PATH = "/ai/generate-image"
 OFFICIAL_ENCODE_VIBE_PATH = "/ai/encode-vibe"
@@ -129,9 +130,27 @@ class EngineSettings:
 
     @property
     def is_v4_model(self) -> bool:
-        """当前模型是否属于 NovelAI V4 系列。"""
+        """当前模型是否属于 NovelAI V4/V5 系列（支持结构化 prompt、坐标及多人物）。"""
 
-        return "diffusion-4" in self.model
+        return self.model in V4_MODELS or self.model in V5_MODELS
+
+    @property
+    def is_v5_model(self) -> bool:
+        """当前模型是否属于 NovelAI V5 系列。"""
+
+        return self.model in V5_MODELS
+
+    @property
+    def supports_vibes(self) -> bool:
+        """当前模型是否支持 Vibe Transfer 风格参考（仅 V4/V4.5 支持，V5 暂不支持）。"""
+
+        return self.model in V4_MODELS
+
+    @property
+    def supports_director_refs(self) -> bool:
+        """当前模型是否支持 Director Reference 角色参考图（仅 V4.5 支持，V5 暂不支持）。"""
+
+        return self.model in V4_MODELS
 
     @property
     def gateway_root(self) -> str:

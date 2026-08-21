@@ -55,7 +55,7 @@ Gateway 需要支持本插件使用的 OpenAI 图片扩展接口，包括文生�
 
 ```toml
 [generation]
-model = "nai-diffusion-4-5-curated"
+model = "nai-diffusion-5-curated"
 resolution = "1024x1024"
 steps = 28
 scale = 5.0
@@ -90,7 +90,7 @@ prompt_guidance_rescale = 0.0
 
 | 调度 ID | 说明 |
 |---------|------|
-| `karras` | Karras（默认，V4 推荐） |
+| `karras` | Karras（默认，V4/V5 推荐） |
 | `exponential` | Exponential |
 | `polyexponential` | Polyexponential |
 | `native` | Native（仅 V3 模型，插件自动切换） |
@@ -217,7 +217,7 @@ Vibe 有两种使用方式：
 - `character&style`：同时参考人物与画风。
 - 参考强度和忠实度。
 
-该能力主要面向 NovelAI V4.5 模型。
+该能力主要面向 NovelAI V4.5/V5 模型。
 
 ## PNG 元数据处理
 

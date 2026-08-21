@@ -303,13 +303,13 @@ class ImageGeneratorConfig(BaseConfig):
         """生图参数配置。"""
 
         model: str = Field(
-            default="nai-diffusion-4-5-curated",
+            default="nai-diffusion-5-curated",
             description="绘图模型",
         )
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
             description=(
-                "噪声调度。可选：karras（默认，V4 推荐）、exponential、"
+                "噪声调度。可选：karras（默认，V4/V5 推荐）、exponential、"
                 "polyexponential、native（仅 V3 模型，插件自动切换）。"
             ),
         )

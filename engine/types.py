@@ -19,6 +19,32 @@ DirectorToolType = Literal[
     "emotion",
 ]
 
+# 固定的 NovelAI 官方支持模型集合（绝对匹配，禁止模糊/子串匹配）
+V5_MODELS: frozenset[str] = frozenset({
+    "nai-diffusion-5-full",
+    "nai-diffusion-5-curated",
+    "nai-diffusion-5-full-inpainting",
+})
+
+V4_MODELS: frozenset[str] = frozenset({
+    "nai-diffusion-4-5-full",
+    "nai-diffusion-4-5-curated",
+    "nai-diffusion-4-5-full-inpainting",
+    "nai-diffusion-4-5-curated-inpainting",
+    "nai-diffusion-4-full",
+    "nai-diffusion-4-curated",
+    "nai-diffusion-4-curated-preview",
+    "nai-diffusion-4-full-inpainting",
+    "nai-diffusion-4-curated-inpainting",
+})
+
+V3_MODELS: frozenset[str] = frozenset({
+    "nai-diffusion-3",
+    "nai-diffusion-3-furry",
+    "nai-diffusion-3-inpainting",
+    "nai-diffusion-3-furry-inpainting",
+})
+
 
 @dataclass(frozen=True, slots=True)
 class VibeAsset:

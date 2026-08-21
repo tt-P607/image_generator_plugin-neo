@@ -101,7 +101,7 @@ def _v4_common_parameters(
     """构造 V4 系列模型公共参数块。"""
 
     effective_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
-    return {
+    params: dict[str, Any] = {
         "params_version": 3,
         "cfg_rescale": effective_rescale,
         "autoSmea": False,
@@ -126,10 +126,12 @@ def _v4_common_parameters(
             "legacy_uc": False,
         },
         "negative_prompt": negative_prompt,
-        "reference_image_multiple": [],
-        "reference_information_extracted_multiple": [],
-        "reference_strength_multiple": [],
     }
+    if settings.supports_vibes:
+        params["reference_image_multiple"] = []
+        params["reference_information_extracted_multiple"] = []
+        params["reference_strength_multiple"] = []
+    return params
 
 
 def _apply_characters(
@@ -256,8 +258,9 @@ def build_official_generation(
             spec.characters,
             use_coords=settings.always_use_coords,
         )
-        _apply_director_refs(parameters, spec.director_refs)
-        if not spec.is_img2img and not spec.director_refs:
+        if settings.supports_director_refs:
+            _apply_director_refs(parameters, spec.director_refs)
+        if settings.supports_vibes and not spec.is_img2img and not spec.director_refs:
             _apply_vibes(parameters, vibes)
     else:
         parameters["negative_prompt"] = negative_prompt
@@ -346,7 +349,10 @@ def build_official_inpaint(
 
     model = settings.model
     if not model.endswith("-inpainting"):
-        model = f"{model}-inpainting"
+        if model == "nai-diffusion-5-curated":
+            model = "nai-diffusion-5-full-inpainting"
+        else:
+            model = f"{model}-inpainting"
 
     return {
         "input": spec.prompt,
@@ -523,7 +529,7 @@ def build_gateway_generation(
             for character in spec.characters
         ]
 
-    if spec.director_refs:
+    if settings.supports_director_refs and spec.director_refs:
         payload["character_references"] = [
             {
                 "image": ref.data,
@@ -535,7 +541,7 @@ def build_gateway_generation(
             for ref in spec.director_refs
         ]
 
-    if vibes:
+    if settings.supports_vibes and vibes:
         payload["reference_image_multiple"] = [vibe.data for vibe in vibes]
         payload["reference_strength_multiple"] = [vibe.strength for vibe in vibes]
         payload["reference_information_extracted_multiple"] = [

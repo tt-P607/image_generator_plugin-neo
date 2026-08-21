@@ -170,8 +170,8 @@ class ImageEngine:
         if spec.characters:
             if not self._settings.is_v4_model:
                 return ImageResult.failure(
-                    f"当前模型 {self._settings.model!r} 不支持多人物生图（仅 V4 系列支持），"
-                    "请先把 generation.model 切到 nai-diffusion-4-* 后再试"
+                    f"当前模型 {self._settings.model!r} 不支持多人物生图（仅 V4/V5 系列支持），"
+                    "请先把 generation.model 切到 nai-diffusion-4-* 或 nai-diffusion-5-* 后再试"
                 )
             if len(spec.characters) > self._settings.max_characters:
                 return ImageResult.failure(

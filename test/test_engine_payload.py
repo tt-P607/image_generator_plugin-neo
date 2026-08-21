@@ -128,7 +128,7 @@ def test_official_generation_switches_to_img2img() -> None:
 def test_official_generation_prefers_director_refs_over_vibes() -> None:
     """验证精密参考存在时不再注入 Vibe 字段。"""
 
-    settings = make_settings(vibe_always_enabled=True)
+    settings = make_settings(model="nai-diffusion-4-5-full", vibe_always_enabled=True)
     spec = GenerationSpec(
         prompt="1girl",
         user_id="tester",
@@ -191,7 +191,9 @@ def test_gateway_generation_matches_openai_image_schema() -> None:
             ),
         ),
     )
-    body = payload_builder.build_gateway_generation(make_settings(), spec)
+    body = payload_builder.build_gateway_generation(
+        make_settings(model="nai-diffusion-4-5-full"), spec
+    )
 
     assert body["size"] == "832x1216"
     assert body["response_format"] == "b64_json"
@@ -210,7 +212,9 @@ def test_gateway_generation_with_vibes_injects_reference_fields() -> None:
         height=1216,
     )
     vibes = (VibeAsset(data="vibe-data", information_extracted=1.0, strength=0.6),)
-    body = payload_builder.build_gateway_generation(make_settings(), spec, vibes)
+    body = payload_builder.build_gateway_generation(
+        make_settings(model="nai-diffusion-4-5-full"), spec, vibes
+    )
 
     assert body["reference_image_multiple"] == ["vibe-data"]
     assert body["reference_strength_multiple"] == [0.6]
@@ -303,3 +307,53 @@ def test_rule_reminder_switch_defaults_off() -> None:
 
     config = ImageGeneratorConfig()
     assert config.prompt.inject_rule_reminder is False
+
+
+def test_v5_model_is_recognized_and_inpaint_mapped() -> None:
+    """验证 V5 模型被识别为结构化架构且 inpainting 映射正确。"""
+
+    settings = make_settings(model="nai-diffusion-5-curated")
+    assert settings.is_v4_model is True
+    assert settings.is_v5_model is True
+    assert settings.supports_vibes is False
+    assert settings.supports_director_refs is False
+
+    spec = InpaintSpec(
+        prompt="1girl, smile",
+        source_image="base64img",
+        mask="base64mask",
+        strength=0.7,
+    )
+    payload = payload_builder.build_official_inpaint(settings, spec)
+    assert payload["model"] == "nai-diffusion-5-full-inpainting"
+    assert "v4_prompt" in payload["parameters"]
+
+
+def test_v5_model_filters_out_vibes_and_director_refs() -> None:
+    """验证 V5 模型生成请求中彻底过滤屏蔽 Vibe 和精密参考参数，防止 500 报错。"""
+
+    settings = make_settings(model="nai-diffusion-5-full")
+    spec = GenerationSpec(
+        prompt="1girl, pink hair",
+        user_id="tester",
+        director_refs=(
+            DirectorRefAsset(
+                data="ref-data",
+                ref_type="character",
+                fidelity=0.8,
+                strength=0.9,
+            ),
+        ),
+    )
+    vibes = (VibeAsset(data="vibe-data", information_extracted=1.0, strength=0.6),)
+
+    # official 渠道验证
+    official_payload = payload_builder.build_official_generation(settings, spec, vibes)
+    params = official_payload["parameters"]
+    assert "reference_image_multiple" not in params
+    assert "director_reference_images" not in params
+
+    # gateway 渠道验证
+    gateway_payload = payload_builder.build_gateway_generation(settings, spec, vibes)
+    assert "reference_image_multiple" not in gateway_payload
+    assert "character_references" not in gateway_payload

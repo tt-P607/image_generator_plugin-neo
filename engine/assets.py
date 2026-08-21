@@ -32,13 +32,24 @@ VIBE_FILE_EXTENSIONS = (
 PREENCODED_EXTENSIONS = (".naiv4vibe", ".naiv4vibebundle")
 TEXT_EXTENSIONS = (".naiv4vibe", ".naiv4vibebundle", ".json", ".txt")
 
-# NovelAI 导出文件中按模型分组的编码键
+# NovelAI 导出文件中按模型分组的绝对精确编码键
 MODEL_ENCODING_KEYS: dict[str, str] = {
-    "nai-diffusion-4-5": "v4-5full",
-    "nai-diffusion-4-5-inpainting": "v4-5full",
+    "nai-diffusion-5-full": "v5full",
+    "nai-diffusion-5-curated": "v5full",
+    "nai-diffusion-5-full-inpainting": "v5full",
+    "nai-diffusion-4-5-full": "v4-5full",
+    "nai-diffusion-4-5-curated": "v4-5full",
+    "nai-diffusion-4-5-full-inpainting": "v4-5full",
+    "nai-diffusion-4-5-curated-inpainting": "v4-5full",
     "nai-diffusion-4-curated-preview": "v4",
     "nai-diffusion-4-full": "v4full",
+    "nai-diffusion-4-curated": "v4",
+    "nai-diffusion-4-full-inpainting": "v4full",
+    "nai-diffusion-4-curated-inpainting": "v4",
     "nai-diffusion-3": "v3",
+    "nai-diffusion-3-furry": "v3",
+    "nai-diffusion-3-inpainting": "v3",
+    "nai-diffusion-3-furry-inpainting": "v3",
 }
 
 VibeEncoder = Callable[[str, float], Awaitable[str | None]]

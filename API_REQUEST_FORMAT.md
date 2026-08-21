@@ -52,7 +52,7 @@ Accept: application/zip
 ```json
 {
   "input": "1girl, blue hair, outdoor",
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "action": "generate",
   "parameters": {
     "params_version": 3,
@@ -91,11 +91,11 @@ Accept: application/zip
 }
 ```
 
-V3 模型不发送 `v4_prompt`、`v4_negative_prompt` 和其他 V4 专用字段。
+V3 模型不发送 `v4_prompt`、`v4_negative_prompt` 和其他 V4/V5 专用字段。
 
 ### 多人物
 
-多人物只用于 V4 系列模型，需要同步填写三组字段：
+多人物只用于 V4/V5 系列模型，需要同步填写三组字段：
 
 ```json
 {
@@ -167,7 +167,7 @@ V3 模型不发送 `v4_prompt`、`v4_negative_prompt` 和其他 V4 专用字段�
 ```json
 {
   "input": "完整画面描述",
-  "model": "nai-diffusion-4-5-curated-inpainting",
+  "model": "nai-diffusion-5-full-inpainting",
   "action": "infill",
   "parameters": {
     "image": "<base64 source>",
@@ -196,7 +196,7 @@ POST https://image.novelai.net/ai/encode-vibe
 {
   "image": "<base64>",
   "information_extracted": 1.0,
-  "model": "nai-diffusion-4-5-curated"
+  "model": "nai-diffusion-5-curated"
 }
 ```
 
@@ -282,7 +282,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "prompt": "1girl, blue hair, outdoor",
   "negative_prompt": "lowres, bad quality",
   "size": "832x1216",
@@ -342,7 +342,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "prompt": "1girl, blue dress",
   "image": "<base64>",
   "strength": 0.7,
@@ -367,7 +367,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "prompt": "完整画面描述",
   "image": "<base64 source>",
   "mask": "<base64 mask>",
@@ -393,7 +393,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "prompt": "portrait of a girl",
   "reference_image_multiple": ["<encoded vibe>"],
   "reference_strength_multiple": [0.6],
@@ -415,7 +415,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "extra": "encode-vibe",
   "image": "<base64>",
   "information_extracted": 1.0
@@ -440,7 +440,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "extra": "upscale",
   "image": "<base64>",
   "width": 512,
@@ -470,7 +470,7 @@ POST /v1/images/generations
 
 ```json
 {
-  "model": "nai-diffusion-4-5-curated",
+  "model": "nai-diffusion-5-curated",
   "extra": "director-colorize",
   "image": "<base64>",
   "width": 1024,
@@ -540,7 +540,7 @@ POST /v1/images/generations
 
 | 调度 ID | 说明 |
 |---------|------|
-| `karras` | Karras（默认，V4 推荐） |
+| `karras` | Karras（默认，V4/V5 推荐） |
 | `exponential` | Exponential |
 | `polyexponential` | Polyexponential |
 | `native` | Native（仅 V3 模型使用，插件对 V3 模型自动切换为此调度） |
