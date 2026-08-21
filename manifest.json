@@ -117,7 +117,7 @@
   ],
   "entry_point": "plugin.py",
   "api_version": {
-    "action_api": "1.0.0",
+    "action_api": "2.0.0",
     "log_api": "1.0.0",
     "media_api": "1.0.0",
     "send_api": "1.0.0",
