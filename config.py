@@ -304,7 +304,16 @@ class ImageGeneratorConfig(BaseConfig):
 
         model: str = Field(
             default="nai-diffusion-5-curated",
-            description="绘图模型",
+            description="默认绘图模型，Bot 未显式指定模型时使用此值",
+        )
+        available_models: list[str] = Field(
+            default_factory=list,
+            max_length=32,
+            description=(
+                "Bot 可选的模型列表。列表不为空时，Bot 可在 draw_image 调用中通过 model 参数"
+                "指定使用哪个模型生成。列表为空则禁用模型选择，始终使用默认模型。\n"
+                "注意：列表中应包含默认模型，否则 Bot 只能显式指定才能使用列表中的模型。"
+            ),
         )
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
@@ -483,7 +492,7 @@ class ImageGeneratorConfig(BaseConfig):
             le=6,
             description=(
                 "单次生图允许的最大角色数（NovelAI Web UI multi-character workspace 默认上限为 6，"
-                "超过该数量会被拒绝；仅 V4 系列模型支持，V3 调用多人物会直接报错）。"
+                "超过该数量会被拒绝；V5 与 V4/V4.5 系列模型支持多人物，V3 调用多人物会直接报错）。"
             ),
         )
 

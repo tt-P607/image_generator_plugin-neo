@@ -83,6 +83,8 @@ class EngineSettings:
     vibe_always_enabled: bool
     vibe_selectable_enabled: bool
 
+    available_models: tuple[str, ...]
+
     @classmethod
     def from_config(cls, config: ImageGeneratorConfig) -> EngineSettings:
         """从插件配置构造引擎快照。
@@ -120,6 +122,7 @@ class EngineSettings:
             vibe_storage_dir=Path(config.advanced.vibe_storage_dir).absolute(),
             vibe_always_enabled=config.vibe.always_enabled,
             vibe_selectable_enabled=config.vibe.selectable_enabled,
+            available_models=tuple(config.generation.available_models),
         )
 
     @property
@@ -151,6 +154,54 @@ class EngineSettings:
         """当前模型是否支持 Director Reference 角色参考图（仅 V4.5 支持，V5 暂不支持）。"""
 
         return self.model in V4_MODELS
+
+    @staticmethod
+    def check_is_v4_or_v5(model: str) -> bool:
+        """指定模型是否属于 V4/V5 系列（支持结构化 prompt、坐标及多人物）。
+
+        Args:
+            model: 模型名
+
+        Returns:
+            是否属于 V4/V5 系列
+        """
+        return model in V4_MODELS or model in V5_MODELS
+
+    @staticmethod
+    def check_is_v5(model: str) -> bool:
+        """指定模型是否属于 V5 系列。
+
+        Args:
+            model: 模型名
+
+        Returns:
+            是否属于 V5 系列
+        """
+        return model in V5_MODELS
+
+    @staticmethod
+    def check_supports_vibes(model: str) -> bool:
+        """指定模型是否支持 Vibe Transfer（仅 V4/V4.5 支持）。
+
+        Args:
+            model: 模型名
+
+        Returns:
+            是否支持
+        """
+        return model in V4_MODELS
+
+    @staticmethod
+    def check_supports_director_refs(model: str) -> bool:
+        """指定模型是否支持 Director Reference（仅 V4/V4.5 支持）。
+
+        Args:
+            model: 模型名
+
+        Returns:
+            是否支持
+        """
+        return model in V4_MODELS
 
     @property
     def gateway_root(self) -> str:

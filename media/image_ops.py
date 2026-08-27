@@ -241,6 +241,28 @@ def build_rect_mask(
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def invert_mask_alpha(b64_data: str) -> str:
+    """按 OpenAI 兼容语义反转蒙版透明度（透明=重绘）。
+
+    插件内部的蒙版约定是白色不透明区域参与重绘；新版 OpenAI 兼容网关要求
+    蒙版透明区域参与重绘、不透明区域保留，转发前需要交换 Alpha 通道。
+
+    Args:
+        b64_data: 蒙版 PNG 的 base64
+
+    Returns:
+        Alpha 反转后的蒙版 PNG base64
+    """
+    raw = base64.b64decode(strip_data_url_prefix(b64_data))
+    with Image.open(io.BytesIO(raw)) as source:
+        red, green, blue, alpha = source.convert("RGBA").split()
+        inverted = alpha.point(lambda value: 255 - value)
+        flipped = Image.merge("RGBA", (red, green, blue, inverted))
+        buffer = io.BytesIO()
+        flipped.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
 def extract_first_image_from_zip(zip_bytes: bytes) -> bytes | None:
     """从 ZIP 响应中取出第一张图片。
 

@@ -111,6 +111,7 @@ class GenerationSpec:
         cfg_rescale: 覆盖 cfg_rescale，None 表示沿用配置值
         source_image: 图生图原图 base64，非空即视为图生图
         strength: 图生图强度，None 表示沿用配置默认值
+        model: 本次指定的模型名，None 表示沿用默认模型
         selected_vibe_names: LLM 自选的 Vibe 名称
         director_refs: 精密参考素材
         characters: 多人物列表，仅 V4 系列模型支持
@@ -126,6 +127,7 @@ class GenerationSpec:
     cfg_rescale: float | None = None
     source_image: str | None = None
     strength: float | None = None
+    model: str | None = None
     selected_vibe_names: tuple[str, ...] = ()
     director_refs: tuple[DirectorRefAsset, ...] = ()
     characters: tuple[CharacterPrompt, ...] = ()

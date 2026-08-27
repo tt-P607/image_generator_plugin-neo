@@ -33,7 +33,7 @@ def detect_model_generation(model: str) -> str:
 
 
 def _model_header_block(config: ImageGeneratorConfig) -> str:
-    """构建当前生效生图模型声明头。"""
+    """构建默认生图模型声明头。"""
     model = config.generation.model.strip() or "nai-diffusion-5-curated"
     generation = detect_model_generation(model)
     gen_title = {
@@ -43,9 +43,9 @@ def _model_header_block(config: ImageGeneratorConfig) -> str:
     }.get(generation, "NovelAI 最新架构")
 
     return (
-        f"【当前生效生图模型】\n"
+        f"【默认生图模型（不指定 model 参数时生效）】\n"
         f"  模型名称：`{model}`（{gen_title}）\n"
-        f"  请严格按照该模型对应的专属语法与特性构建提示词。"
+        f"  请按实际所用模型对应的专属语法与特性构建提示词。"
     )
 
 
@@ -75,11 +75,42 @@ def _character_naming_block() -> str:
     )
 
 
+def _has_selectable_v4_model(config: ImageGeneratorConfig) -> bool:
+    """判断可选模型列表中是否包含 V4 系列模型。
+
+    Args:
+        config: 已校验的插件配置实例
+
+    Returns:
+        可选列表存在且包含 V4 模型时返回 True；列表为空时回退判断默认模型
+    """
+    if config.generation.available_models:
+        return any(
+            detect_model_generation(m) == "v4"
+            for m in config.generation.available_models
+        )
+    return detect_model_generation(config.generation.model) == "v4"
+
+
 def _model_specific_prompt_block(config: ImageGeneratorConfig) -> str:
     """根据当前模型代际动态生成专属的提示词与文字生成语法。"""
     generation = detect_model_generation(config.generation.model)
 
     if generation == "v5":
+        if _has_selectable_v4_model(config):
+            refs_hint = (
+                "  - 参考图支持：\n"
+                "    V5 不使用 Vibe 风格参考与 Director 角色参考图；如本次需要参考图，"
+                "必须在 model 参数中显式指定 V4.5 模型后，再传 selected_vibes / selected_director_refs。"
+                "无论哪个模型，多人物坐标（characters 参数）均可用。"
+            )
+        else:
+            refs_hint = (
+                "  - 参考图支持：\n"
+                "    V5 模型依靠自身强大的提示词语义与原生 Tag 解析能力，"
+                "不使用且不支持 Vibe 风格参考与 Director 角色参考图"
+                "（无需填写 selected_vibes 与 selected_director_refs）。"
+            )
         return (
             "**4. V5 模型专属特性与文字生成**\n"
             "  - 多语言画面文字绘制（V5 核心特性）：\n"
@@ -91,8 +122,7 @@ def _model_specific_prompt_block(config: ImageGeneratorConfig) -> str:
             "    V5 模型对自然语言长句与修饰词理解能力更强，可直接融入丰富的光影描绘（如 volumetric lighting, cinematic lighting, soft warm sunlight filtering through window）。\n"
             "  - 推荐画风品质基调词：\n"
             "    masterpiece, best quality, very aesthetic, official art\n"
-            "  - 参考图支持：\n"
-            "    V5 模型依靠自身强大的提示词语义与原生 Tag 解析能力，不使用且不支持 Vibe 风格参考与 Director 角色参考图（无需填写 selected_vibes 与 selected_director_refs）。"
+            f"{refs_hint}"
         )
     elif generation == "v4":
         return (
@@ -126,7 +156,7 @@ def _multi_character_block(config: ImageGeneratorConfig) -> str:
         )
 
     return (
-        "**5. 多角色与位置控制（5×5 网格坐标系）**\n"
+        "**5. 多角色与位置控制（5×5 网格坐标系，V5 与 V4/V4.5 均支持）**\n"
         "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
         "  - prompt：该角色英文专属标签（必填，包括发型、眼睛、服装、专属动作）\n"
         "  - uc：角色专属负面词（可省略）\n"
@@ -258,11 +288,39 @@ def _custom_block(config: ImageGeneratorConfig) -> str:
     return f"【自定义指引】\n{custom}"
 
 
+def _model_list_block(config: ImageGeneratorConfig) -> str:
+    """构建可选模型列表块。"""
+
+    models = config.generation.available_models
+    if not models:
+        return ""
+
+    default = config.generation.model.strip()
+    gen_labels = {"v5": "V5", "v4": "V4/V4.5", "v3": "V3"}
+    lines = [
+        "【可选模型列表（通过 model 参数指定，不指定则使用默认模型）】"
+        "\n  共同能力：多人物坐标定位（characters）、冒号加权语法、三档画幅。"
+    ]
+    for m in models:
+        gen = detect_model_generation(m)
+        label = gen_labels.get(gen, "未知")
+        suffix = "（默认）" if m == default else ""
+        lines.append(f"  - `{m}` [{label}]{suffix}")
+
+    lines.append(
+        "  差异提示：V5 独有画面文字直接引号语法；"
+        "仅 V4/V4.5 支持画面文字 TEXT: 语法、Vibe 与精密参考。"
+        "需要参考图时切换到 V4.5 模型并传 selected_vibes / selected_director_refs。"
+    )
+    return "\n".join(lines)
+
+
 def _vibe_block(config: ImageGeneratorConfig) -> str:
     """构建可选 Vibe 列表块。"""
 
-    generation = detect_model_generation(config.generation.model)
-    if generation == "v5" or not config.vibe.selectable_enabled or not config.vibe.selectable:
+    if not config.vibe.selectable_enabled or not config.vibe.selectable:
+        return ""
+    if not _has_selectable_v4_model(config):
         return ""
 
     lines = [
@@ -278,10 +336,9 @@ def _director_ref_block(config: ImageGeneratorConfig) -> str:
     """构建可选精密参考列表块。"""
 
     reference = config.director_reference
-    generation = detect_model_generation(config.generation.model)
-    if generation == "v5" or not (
-        reference.enabled and reference.selectable_enabled and reference.selectable
-    ):
+    if not (reference.enabled and reference.selectable_enabled and reference.selectable):
+        return ""
+    if not _has_selectable_v4_model(config):
         return ""
 
     lines = [
@@ -308,6 +365,7 @@ def build_draw_description(config: ImageGeneratorConfig) -> str:
     """
     blocks = [
         _model_header_block(config),
+        _model_list_block(config),
         _base_structure_block(),
         _character_naming_block(),
         _model_specific_prompt_block(config),

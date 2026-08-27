@@ -173,7 +173,7 @@ def test_official_inpaint_uses_infill_model_and_keeps_original() -> None:
 
 
 def test_gateway_generation_matches_openai_image_schema() -> None:
-    """验证 Gateway 文生图字段符合 OpenAI 图片接口约定。"""
+    """验证 Gateway 文生图字段符合新版 OpenAI 图片接口约定（参数收进 params）。"""
 
     spec = GenerationSpec(
         prompt="1girl",
@@ -194,16 +194,26 @@ def test_gateway_generation_matches_openai_image_schema() -> None:
     body = payload_builder.build_gateway_generation(
         make_settings(model="nai-diffusion-4-5-full"), spec
     )
+    params = body["params"]
 
+    # 顶层仅保留 OpenAI 通用字段
+    assert body["model"] == "nai-diffusion-4-5-full"
+    assert body["prompt"] == "1girl"
+    assert body["n"] == 1
     assert body["size"] == "832x1216"
-    assert body["response_format"] == "b64_json"
-    assert body["qualityToggle"] is True
-    assert body["characters"][0]["position"] == [0.3, 0.5]
-    assert body["character_references"][0]["fidelity"] == 0.75
+
+    # NovelAI 专属参数统一在 params 中；负面词为全局内置词与本次额外词的合并
+    assert params["steps"] > 0
+    assert params["sampler"]
+    assert params["quality"] is True
+    assert params["uc_preset"] >= 0
+    assert "text," in f"{params['negative_prompt']},"
+    assert params["characters"][0]["position"] == [0.3, 0.5]
+    assert params["character_references"][0]["fidelity"] == 0.75
 
 
 def test_gateway_generation_with_vibes_injects_reference_fields() -> None:
-    """验证 Gateway 文生图附带 Vibe 时注入 reference_image_multiple 字段。"""
+    """验证 Gateway 文生图附带 Vibe 时在 params 注入参考图字段。"""
 
     spec = GenerationSpec(
         prompt="1girl",
@@ -215,14 +225,15 @@ def test_gateway_generation_with_vibes_injects_reference_fields() -> None:
     body = payload_builder.build_gateway_generation(
         make_settings(model="nai-diffusion-4-5-full"), spec, vibes
     )
+    params = body["params"]
 
-    assert body["reference_image_multiple"] == ["vibe-data"]
-    assert body["reference_strength_multiple"] == [0.6]
-    assert body["reference_information_extracted_multiple"] == [1.0]
+    assert params["reference_image_multiple"] == ["vibe-data"]
+    assert params["reference_strength_multiple"] == [0.6]
+    assert params["reference_information_extracted_multiple"] == [1.0]
 
 
 def test_gateway_generation_img2img_includes_image_field() -> None:
-    """验证 Gateway 图生图通过 image 字段触发，不再使用独立端点。"""
+    """验证 Gateway 图生图通过顶层 image 字段触发，不再使用独立端点。"""
 
     spec = GenerationSpec(
         prompt="1girl",
@@ -234,7 +245,6 @@ def test_gateway_generation_img2img_includes_image_field() -> None:
 
     assert body["image"] == "base64-image"
     assert body["strength"] == 0.7
-    assert body["add_original_image"] is True
 
 
 def test_gateway_director_uses_unified_endpoint_with_extra() -> None:
@@ -330,7 +340,7 @@ def test_v5_model_is_recognized_and_inpaint_mapped() -> None:
 
 
 def test_v5_model_filters_out_vibes_and_director_refs() -> None:
-    """验证 V5 模型生成请求中彻底过滤屏蔽 Vibe 和精密参考参数，防止 500 报错。"""
+    """验证 V5 模型生成请求中彻底过滤屏蔽 Vibe 和精密参考参数，防止 400 报错。"""
 
     settings = make_settings(model="nai-diffusion-5-full")
     spec = GenerationSpec(
@@ -353,7 +363,57 @@ def test_v5_model_filters_out_vibes_and_director_refs() -> None:
     assert "reference_image_multiple" not in params
     assert "director_reference_images" not in params
 
-    # gateway 渠道验证
+    # gateway 渠道验证（新格式 NovelAI 参数均在 params 内）
     gateway_payload = payload_builder.build_gateway_generation(settings, spec, vibes)
-    assert "reference_image_multiple" not in gateway_payload
-    assert "character_references" not in gateway_payload
+    assert "reference_image_multiple" not in gateway_payload["params"]
+    assert "character_references" not in gateway_payload["params"]
+
+
+def test_gateway_per_request_model_overrides_settings_model() -> None:
+    """验证 Gateway 渠道下 spec.model 覆盖默认模型。"""
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        model="nai-diffusion-4-5-full",
+    )
+    body = payload_builder.build_gateway_generation(
+        make_settings(model="nai-diffusion-5-full"), spec
+    )
+
+    assert body["model"] == "nai-diffusion-4-5-full"
+    assert body["prompt"] == "1girl"
+
+
+def test_official_generation_per_request_model_switches_schema() -> None:
+    """验证 official 渠道下 spec.model 为 V3 时按 V3 schema 构建请求体。"""
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        model="nai-diffusion-3",
+    )
+    body = payload_builder.build_official_generation(
+        make_settings(model="nai-diffusion-5-full"), spec, ()
+    )
+
+    assert body["model"] == "nai-diffusion-3"
+    assert body["parameters"]["noise_schedule"] == "native"
+    assert "v4_prompt" not in body["parameters"]
+
+
+def test_v5_multi_character_payload_keeps_structured_fields() -> None:
+    """验证 V5 模型多人物请求保留结构化 characterPrompts 字段（支持多人物）。"""
+
+    settings = make_settings(model="nai-diffusion-5-full")
+    spec = GenerationSpec(
+        prompt="2girls, outdoor",
+        user_id="tester",
+        characters=(CharacterPrompt(prompt="1girl, red hair", x=0.3),),
+    )
+    body = payload_builder.build_official_generation(settings, spec, ())
+    parameters = body["parameters"]
+
+    assert len(parameters["characterPrompts"]) == 1
+    assert parameters["use_coords"] is True
+    assert "v4_prompt" in parameters

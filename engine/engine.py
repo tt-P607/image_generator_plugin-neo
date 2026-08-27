@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -167,10 +168,20 @@ class ImageEngine:
         Returns:
             执行结果
         """
-        if spec.characters:
-            if not self._settings.is_v4_model:
+        effective_model = spec.model or self._settings.model
+
+        # 校验指定模型是否在可选列表中
+        if spec.model and self._settings.available_models:
+            if spec.model not in self._settings.available_models:
                 return ImageResult.failure(
-                    f"当前模型 {self._settings.model!r} 不支持多人物生图（仅 V4/V5 系列支持），"
+                    f"模型 {spec.model!r} 不在可选列表中，"
+                    f"可用模型：{', '.join(self._settings.available_models)}"
+                )
+
+        if spec.characters:
+            if not EngineSettings.check_is_v4_or_v5(effective_model):
+                return ImageResult.failure(
+                    f"当前模型 {effective_model!r} 不支持多人物生图（仅 V4/V5 系列支持），"
                     "请先把 generation.model 切到 nai-diffusion-4-* 或 nai-diffusion-5-* 后再试"
                 )
             if len(spec.characters) > self._settings.max_characters:
@@ -326,6 +337,8 @@ class ImageEngine:
             spec: 生图请求描述
             vibes: 本次实际注入的 Vibe（already 收集完成）
         """
+        effective_model = spec.model or self._settings.model
+
         tags: list[str] = []
         if spec.is_img2img:
             tags.append("图生图")
@@ -354,7 +367,7 @@ class ImageEngine:
             features.append(f"角色={len(spec.characters)}")
 
         params = (
-            f"{spec.width}x{spec.height} | {self._settings.model} | "
+            f"{spec.width}x{spec.height} | {effective_model} | "
             f"steps={self._settings.steps} | scale={spec.scale if spec.scale is not None else self._settings.scale} | "
             f"rescale={spec.cfg_rescale if spec.cfg_rescale is not None else self._settings.cfg_rescale} | "
             f"sampler={self._settings.sampler}"
@@ -406,7 +419,12 @@ class ImageEngine:
 
         if self._settings.is_gateway:
             url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
-            body = payload_builder.build_gateway_inpaint(self._settings, spec)
+            # 新版 OpenAI 兼容蒙版语义为“透明区域重绘”，与内部白=重绘约定相反，
+            # 发送前先反转 Alpha 通道。
+            body = payload_builder.build_gateway_inpaint(
+                self._settings,
+                dataclasses.replace(spec, mask=image_ops.invert_mask_alpha(spec.mask)),
+            )
             response = await self._http.post_json(url, body, api_key)
             return await self._save_gateway_response(response, api_key, target_dir)
 
@@ -504,12 +522,18 @@ class ImageEngine:
     def _collect_vibes(self, spec: GenerationSpec) -> tuple[VibeAsset, ...]:
         """汇总本次生图需要注入的 Vibe。
 
+        基于实际使用的模型判断是否支持 Vibe，不支持时返回空元组。
+
         Args:
             spec: 生图请求描述
 
         Returns:
             always + LLM 自选 + 用户手动加载的 Vibe
         """
+        effective_model = spec.model or self._settings.model
+        if not EngineSettings.check_supports_vibes(effective_model):
+            return ()
+
         collected: list[VibeAsset] = []
         if self._settings.vibe_always_enabled:
             collected.extend(self._assets.always_vibes)
@@ -745,6 +769,7 @@ def replace_spec(
         cfg_rescale=spec.cfg_rescale,
         source_image=source_image,
         strength=spec.strength,
+        model=spec.model,
         selected_vibe_names=spec.selected_vibe_names,
         director_refs=spec.director_refs,
         characters=spec.characters,

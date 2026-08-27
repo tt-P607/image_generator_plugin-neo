@@ -72,8 +72,20 @@ def _base_parameters(
     height: int,
     scale: float | None,
     seed: int,
+    model: str | None = None,
 ) -> dict[str, Any]:
-    """构造 official 协议中两类请求共享的基础参数。"""
+    """构造 official 协议中两类请求共享的基础参数。
+
+    Args:
+        settings: 引擎配置快照
+        width: 目标宽度
+        height: 目标高度
+        scale: 引导比例覆盖
+        seed: 随机种子
+        model: 实际使用的模型名，None 时沿用 settings.model
+    """
+    effective = model or settings.model
+    is_v4 = EngineSettings.check_is_v4_or_v5(effective)
 
     return {
         "width": width,
@@ -87,7 +99,7 @@ def _base_parameters(
         "qualityToggle": True,
         "sm": False,
         "sm_dyn": False,
-        "noise_schedule": settings.noise_schedule if settings.is_v4_model else "native",
+        "noise_schedule": settings.noise_schedule if is_v4 else "native",
     }
 
 
@@ -97,8 +109,19 @@ def _v4_common_parameters(
     prompt: str,
     negative_prompt: str,
     cfg_rescale: float | None,
+    model: str | None = None,
 ) -> dict[str, Any]:
-    """构造 V4 系列模型公共参数块。"""
+    """构造 V4 系列模型公共参数块。
+
+    Args:
+        settings: 引擎配置快照
+        prompt: 正面提示词
+        negative_prompt: 负面提示词
+        cfg_rescale: CFG 缩放覆盖
+        model: 实际使用的模型名，None 时沿用 settings.model
+    """
+    effective = model or settings.model
+    vibes_supported = EngineSettings.check_supports_vibes(effective)
 
     effective_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
     params: dict[str, Any] = {
@@ -127,7 +150,7 @@ def _v4_common_parameters(
         },
         "negative_prompt": negative_prompt,
     }
-    if settings.supports_vibes:
+    if vibes_supported:
         params["reference_image_multiple"] = []
         params["reference_information_extracted_multiple"] = []
         params["reference_strength_multiple"] = []
@@ -230,6 +253,11 @@ def build_official_generation(
     Returns:
         official API 请求体
     """
+    effective_model = spec.model or settings.model
+    is_v4 = EngineSettings.check_is_v4_or_v5(effective_model)
+    vibes_ok = EngineSettings.check_supports_vibes(effective_model)
+    refs_ok = EngineSettings.check_supports_director_refs(effective_model)
+
     negative_prompt = merge_negative_prompts(
         settings.negative_prompt,
         spec.negative_prompt,
@@ -241,15 +269,17 @@ def build_official_generation(
         height=spec.height,
         scale=spec.scale,
         seed=seed,
+        model=effective_model,
     )
 
-    if settings.is_v4_model:
+    if is_v4:
         parameters.update(
             _v4_common_parameters(
                 settings,
                 prompt=spec.prompt,
                 negative_prompt=negative_prompt,
                 cfg_rescale=spec.cfg_rescale,
+                model=effective_model,
             )
         )
         parameters["add_original_image"] = False
@@ -258,16 +288,16 @@ def build_official_generation(
             spec.characters,
             use_coords=settings.always_use_coords,
         )
-        if settings.supports_director_refs:
+        if refs_ok:
             _apply_director_refs(parameters, spec.director_refs)
-        if settings.supports_vibes and not spec.is_img2img and not spec.director_refs:
+        if vibes_ok and not spec.is_img2img and not spec.director_refs:
             _apply_vibes(parameters, vibes)
     else:
         parameters["negative_prompt"] = negative_prompt
 
     payload: dict[str, Any] = {
         "input": spec.prompt,
-        "model": settings.model,
+        "model": effective_model,
         "action": "generate",
         "parameters": parameters,
     }
@@ -471,28 +501,23 @@ def build_gateway_generation(
 ) -> dict[str, Any]:
     """构造 Gateway 渠道文生图 / 图生图 / Vibe 转移请求体。
 
-    新版网关统一使用 ``/v1/images/generations`` 端点，根据请求体字段自动路由：
-    - 仅 ``prompt``：文生图
-    - ``prompt`` + ``image``：图生图
-    - ``prompt`` + ``reference_image_multiple``：Vibe 风格转移
+    遵循新版 OpenAI 图片接口规范：顶层仅保留通用字段（model / prompt / n /
+    size / image / strength），NovelAI 专属参数统一收入 ``params`` 对象，
+    根据额外字段自动路由：提供 ``image`` 即为图生图。
 
     Args:
         settings: 引擎配置快照
         spec: 生图请求描述
-        vibes: 已编码的 Vibe 列表，非空时注入参考图字段
+        vibes: 已编码的 Vibe 列表，非空时在 params 注入参考图字段
 
     Returns:
         Gateway generations 请求体
     """
-    payload: dict[str, Any] = {
-        "model": settings.model,
-        "prompt": spec.prompt,
-        "negative_prompt": merge_negative_prompts(
-            settings.negative_prompt,
-            spec.negative_prompt,
-        ),
-        "size": f"{spec.width}x{spec.height}",
-        "n": 1,
+    effective_model = spec.model or settings.model
+    refs_ok = EngineSettings.check_supports_director_refs(effective_model)
+    vibes_ok = EngineSettings.check_supports_vibes(effective_model)
+
+    params: dict[str, Any] = {
         "steps": settings.steps,
         "scale": spec.scale if spec.scale is not None else settings.scale,
         "cfg_rescale": (
@@ -500,14 +525,25 @@ def build_gateway_generation(
         ),
         "sampler": settings.sampler,
         "noise_schedule": settings.noise_schedule,
-        "ucPreset": settings.uc_preset,
-        "qualityToggle": True,
-        "variety_boost": settings.variety_plus,
-        "use_coords": bool(spec.characters and settings.always_use_coords),
-        "response_format": "b64_json",
+        "negative_prompt": merge_negative_prompts(
+            settings.negative_prompt,
+            spec.negative_prompt,
+        ),
+        "quality": True,
+        "uc_preset": settings.uc_preset,
+    }
+    if settings.variety_plus:
+        params["variety_boost"] = True
+
+    payload: dict[str, Any] = {
+        "model": effective_model,
+        "prompt": spec.prompt,
+        "n": 1,
+        "size": f"{spec.width}x{spec.height}",
+        "params": params,
     }
 
-    # 图生图：提供 image 字段即走 img2img
+    # 图生图：顶层提供 image 即走 img2img
     if spec.is_img2img and spec.source_image:
         strength = (
             spec.strength
@@ -516,10 +552,9 @@ def build_gateway_generation(
         )
         payload["image"] = spec.source_image
         payload["strength"] = strength
-        payload["add_original_image"] = True
 
     if spec.characters:
-        payload["characters"] = [
+        params["characters"] = [
             {
                 "prompt": character.prompt,
                 "negative_prompt": character.negative_prompt,
@@ -528,9 +563,10 @@ def build_gateway_generation(
             }
             for character in spec.characters
         ]
+        params["use_coords"] = bool(settings.always_use_coords)
 
-    if settings.supports_director_refs and spec.director_refs:
-        payload["character_references"] = [
+    if refs_ok and spec.director_refs:
+        params["character_references"] = [
             {
                 "image": ref.data,
                 "type": ref.ref_type,
@@ -541,10 +577,10 @@ def build_gateway_generation(
             for ref in spec.director_refs
         ]
 
-    if settings.supports_vibes and vibes:
-        payload["reference_image_multiple"] = [vibe.data for vibe in vibes]
-        payload["reference_strength_multiple"] = [vibe.strength for vibe in vibes]
-        payload["reference_information_extracted_multiple"] = [
+    if vibes_ok and vibes:
+        params["reference_image_multiple"] = [vibe.data for vibe in vibes]
+        params["reference_strength_multiple"] = [vibe.strength for vibe in vibes]
+        params["reference_information_extracted_multiple"] = [
             vibe.information_extracted for vibe in vibes
         ]
 
@@ -557,8 +593,9 @@ def build_gateway_inpaint(
 ) -> dict[str, Any]:
     """构造 Gateway 渠道局部重绘请求体。
 
-    新版网关统一使用 ``/v1/images/generations`` 端点，提供 ``image`` + ``mask``
-    即走局部重绘。
+    新版 OpenAI 兼容端点在文生图基础上顶层提供 ``image`` + ``mask`` 即走局部重绘；
+    NovelAI 专属采样参数统一收入 ``params``。蒙版需符合 OpenAI 语义
+    （透明区域重绘、不透明区域保留），由调用方（引擎）预先完成转换。
 
     Args:
         settings: 引擎配置快照
@@ -570,23 +607,27 @@ def build_gateway_inpaint(
     return {
         "model": settings.model,
         "prompt": spec.prompt,
+        "size": f"{spec.width}x{spec.height}",
         "image": spec.source_image,
         "mask": spec.mask,
         "strength": spec.strength,
-        # 边缘融合：把原图叠回生成结果，避免重绘区域边缘生硬。
-        "add_original_image": True,
-        "size": f"{spec.width}x{spec.height}",
-        "scale": spec.scale if spec.scale is not None else settings.scale,
-        "cfg_rescale": (
-            spec.cfg_rescale if spec.cfg_rescale is not None else settings.cfg_rescale
-        ),
-        "sampler": settings.sampler,
-        "noise_schedule": settings.noise_schedule,
-        "negative_prompt": merge_negative_prompts(
-            settings.negative_prompt,
-            spec.negative_prompt,
-        ),
-        "response_format": "b64_json",
+        "params": {
+            "steps": settings.steps,
+            "scale": spec.scale if spec.scale is not None else settings.scale,
+            "cfg_rescale": (
+                spec.cfg_rescale
+                if spec.cfg_rescale is not None
+                else settings.cfg_rescale
+            ),
+            "sampler": settings.sampler,
+            "noise_schedule": settings.noise_schedule,
+            "negative_prompt": merge_negative_prompts(
+                settings.negative_prompt,
+                spec.negative_prompt,
+            ),
+            "quality": True,
+            "uc_preset": settings.uc_preset,
+        },
     }
 
 

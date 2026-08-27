@@ -55,6 +55,11 @@ class DrawAction(BaseImageAction):
             "场景专属额外排除词，英文逗号分隔。此处只填本次图片特有的排除内容。"
             "系统已内置的通用负面词无需重复填写。",
         ] = "",
+        model: Annotated[
+            str,
+            "生图模型名称。从可选模型列表中选择，不指定则使用默认模型。"
+            "不同模型支持的特性不同（如 V5 支持画面文字、V4 支持 Vibe/精密参考）。",
+        ] = "",
         selected_vibes: Annotated[
             str,
             "从可用画风列表中选择要应用的 Vibe 名称，多个用英文逗号分隔。"
@@ -67,7 +72,7 @@ class DrawAction(BaseImageAction):
         ] = "",
         characters: Annotated[
             str,
-            "多人物 JSON 数组字符串（仅 V4 系列模型）。最多 6 个角色，每项 "
+            "多人物 JSON 数组字符串（V5 与 V4/V4.5 模型均支持，仅 V3 不支持）。最多 6 个角色，每项 "
             "{prompt, uc?, x?, y?}；x/y 为 0~1 浮点坐标。"
             "互动用 source#/target#/mutual# 语法。单人物时留空。",
         ] = "",
@@ -97,6 +102,7 @@ class DrawAction(BaseImageAction):
             negative_prompt=negative_prompt or None,
             width=width,
             height=height,
+            model=model.strip() or None,
             selected_vibe_names=_split_names(selected_vibes),
             director_refs=engine.assets.select_director_refs(
                 _split_names(selected_director_refs)

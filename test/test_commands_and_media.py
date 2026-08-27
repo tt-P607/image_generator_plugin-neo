@@ -218,7 +218,7 @@ def test_draw_description_detects_and_injects_v5_model() -> None:
     ]
     desc = build_draw_description(config)
 
-    assert "【当前生效生图模型】" in desc
+    assert "【默认生图模型（不指定 model 参数时生效）】" in desc
     assert "nai-diffusion-5-curated" in desc
     assert "NovelAI V5 架构" in desc
     assert "“你好，世界！”" in desc
@@ -235,7 +235,7 @@ def test_draw_description_detects_and_injects_v4_model() -> None:
     config.generation.model = "nai-diffusion-4-5-full"
     desc = build_draw_description(config)
 
-    assert "【当前生效生图模型】" in desc
+    assert "【默认生图模型（不指定 model 参数时生效）】" in desc
     assert "nai-diffusion-4-5-full" in desc
     assert "NovelAI V4 / V4.5 架构" in desc
     assert "TEXT:" in desc
@@ -249,7 +249,7 @@ def test_draw_description_detects_and_injects_v3_model() -> None:
     config.generation.model = "nai-diffusion-3"
     desc = build_draw_description(config)
 
-    assert "【当前生效生图模型】" in desc
+    assert "【默认生图模型（不指定 model 参数时生效）】" in desc
     assert "nai-diffusion-3" in desc
     assert "NovelAI V3 架构" in desc
     assert "纯文本标签" in desc
