@@ -25,7 +25,13 @@ def test_manifest_name_matches_plugin_class() -> None:
 
     manifest = load_manifest()
     assert manifest["name"] == ImageGeneratorPlugin.plugin_name
-    assert manifest["version"] == ImageGeneratorPlugin.plugin_version
+
+
+def test_manifest_declares_version() -> None:
+    """验证 manifest 声明了版本号（元数据唯一权威来源）。"""
+
+    manifest = load_manifest()
+    assert manifest["version"]
 
 
 def test_manifest_declares_all_components() -> None:

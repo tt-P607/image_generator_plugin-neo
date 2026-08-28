@@ -58,7 +58,6 @@ class ImageGeneratorPlugin(BasePlugin):
     """NovelAI 图片生成插件。"""
 
     plugin_name: str = PLUGIN_NAME
-    plugin_version: str = "2.5.1"
 
     configs: list[type] = [ImageGeneratorConfig]
     dependent_components: list[str] = []
