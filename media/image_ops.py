@@ -94,7 +94,7 @@ def strip_png_metadata(image_bytes: bytes) -> bytes:
         if clean.mode == "RGBA":
             red, green, blue, alpha = clean.split()
             # alpha & 0xFE 清零最低位，彻底破坏 LSB 隐写，透明度无损。
-            alpha = alpha.point(lambda value: value & 0xFE)
+            alpha = alpha.point(_clear_alpha_lsb)
             clean = Image.merge("RGBA", (red, green, blue, alpha))
         # 清除 tEXt/iTXt/zTXt 块（NovelAI 的 Comment/Source/Software 等）。
         clean.info.clear()
@@ -193,6 +193,30 @@ def fit_for_director_reference(b64_data: str) -> str:
 MASK_BLOCK = 8
 
 
+def _clear_alpha_lsb(value: int) -> int:
+    """清零 8 位 Alpha 值的最低位。
+
+    Args:
+        value: 像素 Alpha 分量
+
+    Returns:
+        最低位被置 0 后的值
+    """
+    return value & 0xFE
+
+
+def _invert_alpha(value: int) -> int:
+    """反转 8 位 Alpha 值。
+
+    Args:
+        value: 像素 Alpha 分量
+
+    Returns:
+        按位取反后的值
+    """
+    return 255 - value
+
+
 def build_rect_mask(
     width: int,
     height: int,
@@ -256,7 +280,7 @@ def invert_mask_alpha(b64_data: str) -> str:
     raw = base64.b64decode(strip_data_url_prefix(b64_data))
     with Image.open(io.BytesIO(raw)) as source:
         red, green, blue, alpha = source.convert("RGBA").split()
-        inverted = alpha.point(lambda value: 255 - value)
+        inverted = alpha.point(_invert_alpha)
         flipped = Image.merge("RGBA", (red, green, blue, inverted))
         buffer = io.BytesIO()
         flipped.save(buffer, format="PNG")

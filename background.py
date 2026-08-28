@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, TypeVar
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.kernel.concurrency import get_task_manager
@@ -24,7 +24,7 @@ PLUGIN_NAME = "image_generator_plugin-neo"
 
 def spawn(
     plugin: "ImageGeneratorPlugin",
-    coro: Awaitable[T],
+    coro: Coroutine[Any, Any, T],
     *,
     name: str,
     purpose: str,
@@ -66,7 +66,7 @@ def spawn(
 
 async def run_shielded(
     plugin: "ImageGeneratorPlugin",
-    factory: Callable[[], Awaitable[T]],
+    factory: Callable[[], Coroutine[Any, Any, T]],
     *,
     name: str,
     purpose: str,

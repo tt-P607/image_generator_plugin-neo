@@ -370,6 +370,7 @@ class ImageGeneratorConfig(BaseConfig):
                 "Undesired Content 预设（官网 UC Preset 下拉）。"
                 "0=Strong（默认通用质量负面词），1=Light，2=Furry Focus，"
                 "3=Human Focus（推荐正常比例人物，防止 Q 版），4=None（不追加）。"
+                "Gateway 渠道会自动转换为网关要求的字符串值发送。"
             ),
         )
         variety_plus: bool = Field(

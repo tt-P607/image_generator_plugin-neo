@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image, PngImagePlugin
@@ -147,10 +148,14 @@ def test_rect_mask_aligns_to_latent_blocks() -> None:
     with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as mask:
         pixels = mask.convert("L")
         white_columns = [
-            x for x in range(mask.width) if pixels.getpixel((x, mask.height // 2)) > 127
+            x
+            for x in range(mask.width)
+            if cast(int, pixels.getpixel((x, mask.height // 2))) > 127
         ]
         white_rows = [
-            y for y in range(mask.height) if pixels.getpixel((mask.width // 2, y)) > 127
+            y
+            for y in range(mask.height)
+            if cast(int, pixels.getpixel((mask.width // 2, y))) > 127
         ]
         assert white_columns and white_rows
         assert white_columns[0] % 8 == 0

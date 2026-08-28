@@ -37,6 +37,15 @@ GATEWAY_DIRECTOR_EXTRAS: dict[str, str] = {
 
 PROMPT_TOOLS = ("colorize", "emotion")
 
+# uc_preset 整数（official 约定）→ gateway 字符串（OpenAI 兼容网关要求字符串枚举）
+GATEWAY_UC_PRESETS: dict[int, str] = {
+    0: "strong",
+    1: "light",
+    2: "furry_focus",
+    3: "human_focus",
+    4: "none",
+}
+
 
 def merge_negative_prompts(base: str, extra: str | None) -> str:
     """合并全局负面词与本次额外负面词。
@@ -530,7 +539,7 @@ def build_gateway_generation(
             spec.negative_prompt,
         ),
         "quality": True,
-        "uc_preset": settings.uc_preset,
+        "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
     }
     if settings.variety_plus:
         params["variety_boost"] = True
@@ -626,7 +635,7 @@ def build_gateway_inpaint(
                 spec.negative_prompt,
             ),
             "quality": True,
-            "uc_preset": settings.uc_preset,
+            "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
         },
     }
 

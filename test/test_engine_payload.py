@@ -206,7 +206,7 @@ def test_gateway_generation_matches_openai_image_schema() -> None:
     assert params["steps"] > 0
     assert params["sampler"]
     assert params["quality"] is True
-    assert params["uc_preset"] >= 0
+    assert params["uc_preset"] in {"strong", "light", "furry_focus", "human_focus", "none"}
     assert "text," in f"{params['negative_prompt']},"
     assert params["characters"][0]["position"] == [0.3, 0.5]
     assert params["character_references"][0]["fidelity"] == 0.75
