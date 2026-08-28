@@ -170,7 +170,10 @@ def _multi_character_block(config: ImageGeneratorConfig) -> str:
         "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
         "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
         "**注意事项**\n"
-        "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
+        "  - 多角色时 content_description 只写环境/光影/构图与人数标签，角色细节放 characters\n"
+        "  - ⚠️ 人数标签必须与 characters 精确对应：逐个统计各角色的性别后，把总人数写入 "
+        "content_description（如两男一女必须写 2boys, 1girl；两女写 2girls）。"
+        "漏写、多写或性别不匹配会导致画面人物数量错乱甚至崩坏\n"
         "  - 单人物生图时不要传 characters，留空即可"
     )
 
@@ -220,7 +223,10 @@ BASE_DRAW_DESCRIPTION = "\n\n".join(
             "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
             "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
             "**注意事项**\n"
-            "  - 多角色时 content_description 只写环境/光影/构图/人数，角色细节放 characters\n"
+            "  - 多角色时 content_description 只写环境/光影/构图与人数标签，角色细节放 characters\n"
+            "  - ⚠️ 人数标签必须与 characters 精确对应：逐个统计各角色的性别后，把总人数写入 "
+            "content_description（如两男一女必须写 2boys, 1girl；两女写 2girls）。"
+            "漏写、多写或性别不匹配会导致画面人物数量错乱甚至崩坏\n"
             "  - 单人物生图时不要传 characters，留空即可"
         ),
         _composition_and_filename_block(),
