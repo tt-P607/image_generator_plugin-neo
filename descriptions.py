@@ -10,15 +10,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import ImageGeneratorConfig
-from .engine.models import get_model_profile
+from .engine.models import resolve_model_profile
 from .engine.types import V3_MODELS, V4_MODELS, V5_MODELS
 
 
-def detect_model_generation(model: str) -> str:
-    """根据固定的确切模型名称判定 NovelAI 模型代际（绝对匹配）。
+def detect_model_generation(model: str, aliases: dict[str, str] | None = None) -> str:
+    """根据模型名判定 NovelAI 模型代际（支持别名与关键词推断）。
 
     Args:
-        model: 精确模型名，如 'nai-diffusion-5-curated'
+        model: 模型名，可能是官方 ID、别名或第三方自定义名
+        aliases: 别名映射（自定义名 → 官方模型 ID）
 
     Returns:
         'v5' | 'v4' | 'v3' | 'unknown'
@@ -30,13 +31,17 @@ def detect_model_generation(model: str) -> str:
         return "v4"
     if cleaned in V3_MODELS:
         return "v3"
-    return "unknown"
+    try:
+        profile = resolve_model_profile(cleaned, aliases)
+    except ValueError:
+        return "unknown"
+    return "v5" if profile.is_v5 else "v4"
 
 
 def _model_header_block(config: ImageGeneratorConfig) -> str:
     """构建默认生图模型声明头。"""
     model = config.generation.model.strip() or "nai-diffusion-5-curated"
-    generation = detect_model_generation(model)
+    generation = detect_model_generation(model, config.generation.model_aliases)
     gen_title = {
         "v5": "NovelAI V5 架构",
         "v4": "NovelAI V4 / V4.5 架构",
@@ -85,16 +90,18 @@ def _has_selectable_v4_model(config: ImageGeneratorConfig) -> bool:
     """
     if config.generation.available_models:
         return any(
-            detect_model_generation(m) == "v4"
+            detect_model_generation(m, config.generation.model_aliases) == "v4"
             for m in config.generation.available_models
         )
-    return detect_model_generation(config.generation.model) == "v4"
+    return detect_model_generation(
+        config.generation.model, config.generation.model_aliases
+    ) == "v4"
 
 
-def _model_specific_prompt_block(model: str) -> str:
+def _model_specific_prompt_block(model: str, aliases: dict[str, str] | None = None) -> str:
     """构建一个受支持模型的完整提示词与能力说明。"""
 
-    profile = get_model_profile(model)
+    profile = resolve_model_profile(model, aliases or {})
     edition = "Full" if profile.edition == "full" else "Curated"
     if profile.is_v5:
         return (
@@ -176,7 +183,7 @@ def _all_model_specific_blocks(config: ImageGeneratorConfig) -> str:
     """构建配置白名单内全部模型的专属能力说明。"""
 
     return "\n\n".join(
-        _model_specific_prompt_block(model)
+        _model_specific_prompt_block(model, config.generation.model_aliases)
         for model in _configured_generation_models(config)
     )
 
@@ -297,7 +304,7 @@ def _model_list_block(config: ImageGeneratorConfig) -> str:
         "\n  只能从此白名单选择；每次调用必须按所选模型的专属规则构建其他参数。"
     ]
     for model in models:
-        profile = get_model_profile(model)
+        profile = resolve_model_profile(model, config.generation.model_aliases)
         suffix = "（默认）" if model == default else ""
         lines.append(f"  - `{model}` [{profile.family} {profile.edition}]{suffix}")
 

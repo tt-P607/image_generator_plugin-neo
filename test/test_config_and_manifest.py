@@ -112,6 +112,50 @@ def test_config_enforces_generation_model_whitelist() -> None:
         ImageGeneratorConfig.model_validate(raw)
 
 
+def test_config_accepts_alias_models_via_mapping() -> None:
+    """验证第三方中转的自定义模型名经 model_aliases 映射后可通过校验。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["model"] = "my-v5"
+    raw["generation"]["available_models"] = ["my-v5", "nai-diffusion-4-5-full"]
+    raw["generation"]["model_aliases"] = {"my-v5": "nai-diffusion-5-full"}
+    config = ImageGeneratorConfig.model_validate(raw)
+
+    assert config.generation.model == "my-v5"
+    assert config.generation.model_aliases == {"my-v5": "nai-diffusion-5-full"}
+
+
+def test_config_accepts_keyword_inferable_third_party_models() -> None:
+    """验证含版本关键词的第三方模型名无需别名即可通过校验。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["model"] = "some-proxy/novelai-v5"
+    raw["generation"]["available_models"] = [
+        "some-proxy/novelai-v5",
+        "proxy-4.5-full",
+    ]
+    config = ImageGeneratorConfig.model_validate(raw)
+
+    assert config.generation.model == "some-proxy/novelai-v5"
+    assert config.generation.model_aliases == {}
+
+
+def test_config_rejects_invalid_alias_targets_and_conflicts() -> None:
+    """验证别名目标必须是官方生图模型且不能与官方 ID 重名。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["model_aliases"] = {"my-v5": "nai-diffusion-future"}
+    with pytest.raises(ValidationError, match="目标必须是官方生图模型"):
+        ImageGeneratorConfig.model_validate(raw)
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["model_aliases"] = {
+        "nai-diffusion-5-full": "nai-diffusion-5-curated"
+    }
+    with pytest.raises(ValidationError, match="不能与官方模型 ID 重名"):
+        ImageGeneratorConfig.model_validate(raw)
+
+
 def test_config_discards_empty_vibe_placeholders() -> None:
     """验证渲染器生成的空 Vibe 占位项不会阻断配置加载。"""
 

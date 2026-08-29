@@ -10,14 +10,45 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ImageGeneratorConfig
-from .models import GENERATION_MODELS, get_model_profile
-from .types import V4_MODELS, V5_MODELS
+from .models import ModelProfile, resolve_model_profile
 
 OFFICIAL_GENERATE_PATH = "/ai/generate-image"
 OFFICIAL_ENCODE_VIBE_PATH = "/ai/encode-vibe"
 OFFICIAL_AUGMENT_PATH = "/ai/augment-image"
 OFFICIAL_UPSCALE_PATH = "/ai/upscale"
 OFFICIAL_SUBSCRIPTION_PATH = "/user/subscription"
+
+
+def resolve_model_alias(model: str, aliases: dict[str, str]) -> str:
+    """把模型名按别名映射解析为官方模型 ID。
+
+    Args:
+        model: 模型名，可能是官方 ID 或别名
+        aliases: 别名映射（自定义名 → 官方模型 ID）
+
+    Returns:
+        官方模型 ID
+    """
+
+    return aliases.get(model, model)
+
+
+def _is_supported_generation_model(model: str, aliases: dict[str, str]) -> bool:
+    """判断模型名是否可解析为受支持的生图模型。
+
+    Args:
+        model: 模型名（官方 ID、别名或第三方自定义名）
+        aliases: 别名映射（自定义名 → 官方模型 ID）
+
+    Returns:
+        可解析为生图模型时返回 True
+    """
+
+    try:
+        profile = resolve_model_profile(model, aliases)
+    except ValueError:
+        return False
+    return not profile.inpainting
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +114,7 @@ class EngineSettings:
     vibe_selectable_enabled: bool
 
     available_models: tuple[str, ...]
+    model_aliases: dict[str, str]
 
     @classmethod
     def from_config(cls, config: ImageGeneratorConfig) -> EngineSettings:
@@ -95,7 +127,7 @@ class EngineSettings:
             引擎运行时配置快照
         """
         default_model = config.generation.model.strip()
-        get_model_profile(default_model)
+        resolve_model_profile(default_model, config.generation.model_aliases)
         available_models = tuple(
             dict.fromkeys(
                 model.strip()
@@ -104,7 +136,11 @@ class EngineSettings:
             )
         )
         invalid_models = [
-            model for model in available_models if model not in GENERATION_MODELS
+            model
+            for model in available_models
+            if not _is_supported_generation_model(
+                model, config.generation.model_aliases
+            )
         ]
         if invalid_models:
             raise ValueError(
@@ -141,6 +177,7 @@ class EngineSettings:
             vibe_always_enabled=config.vibe.always_enabled,
             vibe_selectable_enabled=config.vibe.selectable_enabled,
             available_models=available_models,
+            model_aliases=dict(config.generation.model_aliases),
         )
 
     @property
@@ -149,12 +186,38 @@ class EngineSettings:
 
         return self.available_models or (self.model,)
 
+    def resolve_model(self, model: str) -> str:
+        """把请求模型名解析为官方模型 ID。
+
+        Args:
+            model: 请求中的模型名，可能是官方 ID 或别名
+
+        Returns:
+            官方模型 ID
+        """
+
+        return self.model_aliases.get(model, model)
+
+    def model_profile(self, model: str) -> ModelProfile:
+        """读取请求模型名对应的能力档案。
+
+        支持官方 ID、别名映射与第三方模型名关键词推断。
+
+        Args:
+            model: 请求中的模型名
+
+        Returns:
+            模型能力档案
+        """
+
+        return resolve_model_profile(model, self.model_aliases)
+
     @property
     def vibe_model(self) -> str | None:
         """返回白名单中用于加载和编码 Vibe 的 V4.5 模型。"""
 
         for model in self.allowed_models:
-            if get_model_profile(model).supports_vibe:
+            if self.model_profile(model).supports_vibe:
                 return model
         return None
 
@@ -168,73 +231,25 @@ class EngineSettings:
     def is_v4_model(self) -> bool:
         """当前模型是否属于 NovelAI V4/V5 系列（支持结构化 prompt、坐标及多人物）。"""
 
-        return self.model in V4_MODELS or self.model in V5_MODELS
+        return self.model_profile(self.model).family in ("v4.5", "v5")
 
     @property
     def is_v5_model(self) -> bool:
         """当前模型是否属于 NovelAI V5 系列。"""
 
-        return self.model in V5_MODELS
+        return self.model_profile(self.model).is_v5
 
     @property
     def supports_vibes(self) -> bool:
         """当前模型是否支持 Vibe Transfer 风格参考（仅 V4/V4.5 支持，V5 暂不支持）。"""
 
-        return self.model in V4_MODELS
+        return self.model_profile(self.model).supports_vibe
 
     @property
     def supports_director_refs(self) -> bool:
         """当前模型是否支持 Director Reference 角色参考图（仅 V4.5 支持，V5 暂不支持）。"""
 
-        return self.model in V4_MODELS
-
-    @staticmethod
-    def check_is_v4_or_v5(model: str) -> bool:
-        """指定模型是否属于 V4/V5 系列（支持结构化 prompt、坐标及多人物）。
-
-        Args:
-            model: 模型名
-
-        Returns:
-            是否属于 V4/V5 系列
-        """
-        return model in V4_MODELS or model in V5_MODELS
-
-    @staticmethod
-    def check_is_v5(model: str) -> bool:
-        """指定模型是否属于 V5 系列。
-
-        Args:
-            model: 模型名
-
-        Returns:
-            是否属于 V5 系列
-        """
-        return model in V5_MODELS
-
-    @staticmethod
-    def check_supports_vibes(model: str) -> bool:
-        """指定模型是否支持 Vibe Transfer（仅 V4/V4.5 支持）。
-
-        Args:
-            model: 模型名
-
-        Returns:
-            是否支持
-        """
-        return model in V4_MODELS
-
-    @staticmethod
-    def check_supports_director_refs(model: str) -> bool:
-        """指定模型是否支持 Director Reference（仅 V4/V4.5 支持）。
-
-        Args:
-            model: 模型名
-
-        Returns:
-            是否支持
-        """
-        return model in V4_MODELS
+        return self.model_profile(self.model).supports_director_reference
 
     @property
     def gateway_root(self) -> str:

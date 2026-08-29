@@ -244,6 +244,10 @@ select option { background: var(--panel); }
         <label>Bot 可选模型白名单（英文逗号分隔；留空表示仅允许默认模型）</label>
         <input type="text" id="cfgAvailableModels" placeholder="nai-diffusion-5-curated, nai-diffusion-4-5-full" />
       </div>
+      <div style="margin-bottom:12px">
+        <label>模型别名映射（第三方中转模型名不同时使用；格式：自定义名=官方模型ID，逗号分隔）</label>
+        <input type="text" id="cfgModelAliases" placeholder="my-v5=nai-diffusion-5-full, my-v45=nai-diffusion-4-5-full" />
+      </div>
       <div class="grid-3" style="margin-bottom:12px">
         <div><label>默认分辨率</label><select id="cfgResolution">
           <option value="832x1216">832x1216</option><option value="1216x832">1216x832</option><option value="1024x1024">1024x1024</option>
@@ -464,6 +468,7 @@ function fillConfigForm(d) {
   const g = d.generation || {};
   document.getElementById('cfgModel').value = g.model || '';
   document.getElementById('cfgAvailableModels').value = (g.availableModels || []).join(', ');
+  document.getElementById('cfgModelAliases').value = Object.entries(g.modelAliases || {}).map(function(pair) { return pair[0] + '=' + pair[1]; }).join(', ');
   document.getElementById('cfgSampler').value = g.sampler || '';
   document.getElementById('cfgNoiseSchedule').value = g.noiseSchedule || 'karras';
   document.getElementById('cfgResolution').value = g.resolution || '832x1216';
@@ -603,6 +608,16 @@ function collectConfig() {
   const g = {
     model: v('cfgModel'), sampler: sel('cfgSampler'), noiseSchedule: sel('cfgNoiseSchedule'),
     availableModels: v('cfgAvailableModels').split(',').map(m => m.trim()).filter(Boolean),
+    modelAliases: (function() {
+      var aliases = {};
+      v('cfgModelAliases').split(',').forEach(function(pair) {
+        var parts = pair.split('=');
+        if (parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+          aliases[parts[0].trim()] = parts[1].trim();
+        }
+      });
+      return aliases;
+    })(),
     resolution: sel('cfgResolution'), steps: intv('cfgSteps'), scale: floatv('cfgScale'),
     promptGuidanceRescale: floatv('cfgPromptRescale'), ucPreset: intv('cfgUcPreset'),
     varietyPlus: sel('cfgVarietyPlus')==='true', styleReference: v('cfgStyleReference'),

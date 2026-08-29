@@ -62,6 +62,7 @@ def config_to_payload(
         "generation": {
             "model": config.generation.model,
             "availableModels": config.generation.available_models,
+            "modelAliases": config.generation.model_aliases,
             "noiseSchedule": config.generation.noise_schedule,
             "resolution": config.generation.resolution,
             "steps": config.generation.steps,
@@ -178,6 +179,17 @@ def apply_overrides(
             for model in generation["availableModels"]
             if str(model).strip()
         ]
+    if "modelAliases" in generation:
+        raw_aliases = generation["modelAliases"]
+        config.generation.model_aliases = (
+            {
+                str(name).strip(): str(target).strip()
+                for name, target in raw_aliases.items()
+                if str(name).strip() and str(target).strip()
+            }
+            if isinstance(raw_aliases, dict)
+            else {}
+        )
 
     prompt = overrides.get("prompt", {})
     if "customInstructions" in prompt:

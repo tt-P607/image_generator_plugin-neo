@@ -9,7 +9,6 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from .models import get_model_profile
 from .settings import EngineSettings
 from .types import (
     CharacterPrompt,
@@ -105,7 +104,7 @@ def _base_parameters(
         model: 实际使用的模型名，None 时沿用 settings.model
     """
     effective = model or settings.model
-    is_v4 = EngineSettings.check_is_v4_or_v5(effective)
+    profile = settings.model_profile(effective)
 
     return {
         "width": width,
@@ -119,7 +118,11 @@ def _base_parameters(
         "qualityToggle": True,
         "sm": False,
         "sm_dyn": False,
-        "noise_schedule": settings.noise_schedule if is_v4 else "native",
+        "noise_schedule": (
+            settings.noise_schedule
+            if profile.family in ("v4.5", "v5")
+            else "native"
+        ),
     }
 
 
@@ -143,7 +146,7 @@ def _v4_common_parameters(
         model: 实际使用的模型名，None 时沿用 settings.model
     """
     effective = model or settings.model
-    vibes_supported = EngineSettings.check_supports_vibes(effective)
+    vibes_supported = settings.model_profile(effective).supports_vibe
 
     effective_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
     effective_variety = (
@@ -279,9 +282,9 @@ def build_official_generation(
         official API 请求体
     """
     effective_model = spec.model or settings.model
-    is_v4 = EngineSettings.check_is_v4_or_v5(effective_model)
-    vibes_ok = EngineSettings.check_supports_vibes(effective_model)
-    refs_ok = EngineSettings.check_supports_director_refs(effective_model)
+    profile = settings.model_profile(effective_model)
+    vibes_ok = profile.supports_vibe
+    refs_ok = profile.supports_director_reference
 
     negative_prompt = merge_negative_prompts(
         settings.negative_prompt,
@@ -299,7 +302,7 @@ def build_official_generation(
         model=effective_model,
     )
 
-    if is_v4:
+    if profile.family in ("v4.5", "v5"):
         parameters.update(
             _v4_common_parameters(
                 settings,
@@ -372,7 +375,7 @@ def build_official_inpaint(
         render_text=spec.render_text,
     )
     effective_model = spec.model or settings.model
-    profile = get_model_profile(effective_model)
+    profile = settings.model_profile(effective_model)
     seed = random.randint(0, SEED_MAX)
     parameters = _base_parameters(
         settings,
@@ -397,7 +400,7 @@ def build_official_inpaint(
         }
     )
 
-    if EngineSettings.check_is_v4_or_v5(effective_model):
+    if profile.family in ("v4.5", "v5"):
         parameters.update(
             _v4_common_parameters(
                 settings,
@@ -544,8 +547,9 @@ def build_gateway_generation(
         Gateway generations 请求体
     """
     effective_model = spec.model or settings.model
-    refs_ok = EngineSettings.check_supports_director_refs(effective_model)
-    vibes_ok = EngineSettings.check_supports_vibes(effective_model)
+    profile = settings.model_profile(effective_model)
+    refs_ok = profile.supports_director_reference
+    vibes_ok = profile.supports_vibe
 
     params: dict[str, Any] = {
         "steps": spec.steps if spec.steps is not None else settings.steps,

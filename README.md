@@ -78,6 +78,21 @@ prompt_guidance_rescale = 0.0
 
 Full 更适合精细控制，Curated 更偏稳定和审美一致。局部重绘会自动映射到同代 Inpainting 模型，不能把 `*-inpainting` 直接写入白名单。
 
+### 第三方中转的模型名
+
+使用模型名与官方不同的第三方中转时，无需手动映射：只要模型名包含版本关键词，插件会自动推断能力档案——`4.5` / `4-5` / `45` 判为 V4.5，`5` / `v5` 判为 V5；名称含 `curated` 判为 Curated，否则按 Full。例如 `some-proxy/novelai-v5` 会按 V5 Full 处理，`proxy-4.5-curated` 会按 V4.5 Curated 处理，请求体仍发送原始模型名。
+
+仅当模型名完全不含版本关键词、或自动推断不符合预期时，才需要 `model_aliases` 显式映射：
+
+```toml
+[generation]
+model = "my-v5"
+available_models = ["my-v5", "my-v45"]
+model_aliases = { my-v5 = "nai-diffusion-5-full", my-v45 = "nai-diffusion-4-5-full" }
+```
+
+别名可写入 `model` 与 `available_models`，不能与官方模型 ID 重名；能力判断（提示词规则、多角色上限、Vibe 兼容性等）按映射的官方模型执行。
+
 推荐画幅：
 
 | 用途 | 尺寸 |

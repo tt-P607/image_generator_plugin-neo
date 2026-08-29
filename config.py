@@ -129,6 +129,26 @@ def _resolve_section_model(annotation: Any) -> type[SectionBase] | None:
     return None
 
 
+def _is_inferable_model(model: str, aliases: dict[str, str]) -> bool:
+    """判断模型名能否被插件解析为受支持的生图模型。
+
+    Args:
+        model: 模型名（官方 ID、别名或第三方自定义名）
+        aliases: 别名映射（自定义名 → 官方模型 ID）
+
+    Returns:
+        可解析为生图模型时返回 True
+    """
+
+    from .engine.models import resolve_model_profile
+
+    try:
+        profile = resolve_model_profile(model, aliases)
+    except ValueError:
+        return False
+    return not profile.inpainting
+
+
 class ImageGeneratorConfig(BaseConfig):
     """图片生成插件配置。"""
 
@@ -184,7 +204,7 @@ class ImageGeneratorConfig(BaseConfig):
 
     @model_validator(mode="after")
     def validate_generation_models(self) -> ImageGeneratorConfig:
-        """校验默认模型与 Bot 可选模型白名单。"""
+        """校验默认模型、Bot 可选模型白名单与模型别名映射。"""
 
         from .engine.models import GENERATION_MODELS
 
@@ -194,18 +214,50 @@ class ImageGeneratorConfig(BaseConfig):
             for model in self.generation.available_models
             if model.strip()
         ]
+        aliases = {
+            name.strip(): target.strip()
+            for name, target in self.generation.model_aliases.items()
+            if name.strip() and target.strip()
+        }
+
+        def resolve(model: str) -> str:
+            """把配置模型名解析为官方模型 ID。"""
+
+            return aliases.get(model, model)
+
         invalid_models = [
             model
             for model in [default_model, *available_models]
-            if model not in GENERATION_MODELS
+            if resolve(model) not in GENERATION_MODELS
+            and not _is_inferable_model(model, aliases)
         ]
         if invalid_models:
             raise ValueError(
-                "仅支持 V4.5/V5 生图模型："
+                "仅支持 V4.5/V5 生图模型（第三方中转的自定义模型名需含 4.5/5 等版本关键词，"
+                "或配置 model_aliases）："
                 + ", ".join(dict.fromkeys(invalid_models))
             )
         if available_models and default_model not in available_models:
             raise ValueError("available_models 必须包含 generation.model 默认模型")
+
+        invalid_alias_targets = [
+            f"{name} -> {target}"
+            for name, target in aliases.items()
+            if target not in GENERATION_MODELS
+        ]
+        if invalid_alias_targets:
+            raise ValueError(
+                "model_aliases 的目标必须是官方生图模型 ID："
+                + ", ".join(invalid_alias_targets)
+            )
+        alias_conflicts = [
+            name for name in aliases if name in GENERATION_MODELS
+        ]
+        if alias_conflicts:
+            raise ValueError(
+                "model_aliases 的别名不能与官方模型 ID 重名："
+                + ", ".join(alias_conflicts)
+            )
         return self
 
     @config_section("plugin")
@@ -338,7 +390,19 @@ class ImageGeneratorConfig(BaseConfig):
             description=(
                 "Bot 可选的模型列表。列表不为空时，Bot 可在 draw_image 调用中通过 model 参数"
                 "指定使用哪个模型生成。列表为空则禁用模型选择，始终使用默认模型。\n"
-                "列表不为空时必须包含默认模型，且所有模型都必须在插件支持列表内。"
+                "列表不为空时必须包含默认模型；模型名通常是官方 ID，"
+                "第三方中转的自定义模型名可通过 model_aliases 映射后使用。"
+            ),
+        )
+        model_aliases: dict[str, str] = Field(
+            default_factory=dict,
+            description=(
+                "模型别名映射（自定义模型名 → 官方模型 ID），可选。\n"
+                "第三方中转的模型名通常无需配置：只要名称包含 4.5/5 等版本关键词，"
+                "插件会自动推断代际与画风（含 curated 判 Curated，否则按 Full）。\n"
+                "仅当自动推断不符合预期（如名称完全无版本关键词）时才需要此映射；"
+                "键为请求时实际发送的自定义模型名，值为官方生图模型 ID。\n"
+                "别名可写入 model 与 available_models；不能与官方模型 ID 重名。"
             ),
         )
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(

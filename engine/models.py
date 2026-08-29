@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 ModelFamily = Literal["v4.5", "v5"]
@@ -175,3 +175,75 @@ def get_model_profile(model_id: str) -> ModelProfile:
         raise ValueError(
             f"不支持的 NovelAI 模型 {cleaned!r}，可用模型：{supported}"
         ) from error
+
+
+def infer_model_profile(model_name: str) -> ModelProfile | None:
+    """按名称关键词推断第三方模型名对应的能力档案。
+
+    识别规则（大小写不敏感）：
+    - 代际：``4.5`` / ``4-5`` / ``45`` / ``v4.5`` 判为 V4.5；``5`` / ``v5`` 判为 V5。
+      同时含两者时（如 ``4.5`` 优先）按更具体的 V4.5 处理。
+    - 画风：``curated`` 判为 Curated，否则按 Full。
+    - 推断结果复用对应官方模型的能力档案，仅 ``model_id`` 替换为实际名称。
+
+    Args:
+        model_name: 任意来源的模型名（官方 ID 或第三方自定义名）
+
+    Returns:
+        推断出的能力档案；无法识别代际时返回 None
+    """
+
+    lowered = model_name.strip().lower()
+    if not lowered:
+        return None
+
+    if "4.5" in lowered or "4-5" in lowered or "45" in lowered:
+        family: ModelFamily = "v4.5"
+    elif "5" in lowered:
+        family = "v5"
+    else:
+        return None
+
+    edition: ModelEdition = "curated" if "curated" in lowered else "full"
+    family_id = "4-5" if family == "v4.5" else "5"
+    profile = get_model_profile(f"nai-diffusion-{family_id}-{edition}")
+    return replace(profile, model_id=model_name.strip())
+
+
+def resolve_model_profile(
+    model_name: str,
+    aliases: dict[str, str] | None = None,
+) -> ModelProfile:
+    """解析任意模型名为能力档案。
+
+    解析顺序：官方精确 ID → 别名映射 → 关键词推断。
+
+    Args:
+        model_name: 模型名（官方 ID、别名或第三方自定义名）
+        aliases: 别名映射（自定义名 → 官方模型 ID），可选
+
+    Returns:
+        模型能力档案
+
+    Raises:
+        ValueError: 无法识别模型代际
+    """
+
+    cleaned = model_name.strip()
+    if cleaned in MODEL_PROFILES:
+        return MODEL_PROFILES[cleaned]
+
+    if aliases:
+        target = aliases.get(cleaned)
+        if target and target in MODEL_PROFILES:
+            return MODEL_PROFILES[target]
+
+    inferred = infer_model_profile(cleaned)
+    if inferred is not None:
+        return inferred
+
+    supported = ", ".join(sorted(GENERATION_MODELS))
+    raise ValueError(
+        f"无法识别模型 {cleaned!r} 的代际。官方模型：{supported}；"
+        "第三方模型名需包含 4.5/5 等版本关键词，或通过 model_aliases 显式映射"
+    )

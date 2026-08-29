@@ -404,6 +404,91 @@ def test_vibe_model_uses_supported_model_from_whitelist() -> None:
     assert v5_only.vibe_model is None
 
 
+def test_alias_model_resolves_profile_and_keeps_request_name() -> None:
+    """验证别名模型按官方档案判断能力，请求体保留自定义模型名。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "my-v5"
+    config.generation.available_models = ["my-v5"]
+    config.generation.model_aliases = {"my-v5": "nai-diffusion-5-full"}
+    settings = EngineSettings.from_config(config)
+
+    assert settings.resolve_model("my-v5") == "nai-diffusion-5-full"
+    assert settings.model_profile("my-v5").is_v5 is True
+    assert settings.model_profile("my-v5").max_characters == 22
+    assert settings.model_profile("my-v5").supports_vibe is False
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        characters=(CharacterPrompt(prompt="1girl, red hair", x=0.3),),
+    )
+    official = payload_builder.build_official_generation(settings, spec, ())
+    gateway = payload_builder.build_gateway_generation(settings, spec)
+
+    assert official["model"] == "my-v5"
+    assert gateway["model"] == "my-v5"
+    assert official["parameters"]["noise_schedule"] == "karras"
+    assert official["parameters"]["v4_prompt"]["use_coords"] is True
+
+
+def test_keyword_inference_resolves_third_party_model_names() -> None:
+    """验证含版本关键词的第三方模型名可自动推断能力档案。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "proxy/novelai-4.5-curated"
+    config.generation.available_models = [
+        "proxy/novelai-4.5-curated",
+        "some-v5-model",
+    ]
+    settings = EngineSettings.from_config(config)
+
+    v45 = settings.model_profile("proxy/novelai-4.5-curated")
+    assert v45.family == "v4.5"
+    assert v45.edition == "curated"
+    assert v45.supports_vibe is True
+    assert v45.max_characters == 6
+
+    v5 = settings.model_profile("some-v5-model")
+    assert v5.is_v5 is True
+    assert v5.edition == "full"
+    assert v5.max_characters == 22
+    assert v5.supports_vibe is False
+
+    spec = GenerationSpec(prompt="1girl", user_id="tester")
+    official = payload_builder.build_official_generation(settings, spec, ())
+    assert official["model"] == "proxy/novelai-4.5-curated"
+
+
+def test_unrecognizable_model_name_fails_clearly() -> None:
+    """验证无版本关键词且无别名的模型名返回明确错误。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "totally-unknown-model"
+    with pytest.raises(ValueError, match="无法识别模型"):
+        EngineSettings.from_config(config)
+
+
+def test_alias_model_inpainting_derives_from_alias_name() -> None:
+    """验证别名模型的局部重绘映射到官方 Inpainting 模型。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "my-v45"
+    config.generation.model_aliases = {"my-v45": "nai-diffusion-4-5-full"}
+    settings = EngineSettings.from_config(config)
+
+    spec = InpaintSpec(
+        prompt="1girl, pink dress",
+        source_image="image",
+        mask="mask",
+        strength=0.6,
+    )
+    body = payload_builder.build_official_inpaint(settings, spec)
+
+    assert body["model"] == "nai-diffusion-4-5-full-inpainting"
+    assert body["action"] == "infill"
+
+
 def test_rule_reminder_switch_defaults_off() -> None:
     """验证生图规则注入开关默认关闭。"""
 
@@ -485,13 +570,13 @@ def test_official_generation_per_request_model_switches_schema() -> None:
         user_id="tester",
         model="nai-diffusion-3",
     )
-    body = payload_builder.build_official_generation(
-        make_settings(model="nai-diffusion-5-full"), spec, ()
-    )
+    settings = make_settings(model="nai-diffusion-5-full")
+    settings.model_aliases["nai-diffusion-3"] = "nai-diffusion-4-5-full"
+    body = payload_builder.build_official_generation(settings, spec, ())
 
     assert body["model"] == "nai-diffusion-3"
-    assert body["parameters"]["noise_schedule"] == "native"
-    assert "v4_prompt" not in body["parameters"]
+    assert body["parameters"]["noise_schedule"] == "karras"
+    assert "v4_prompt" in body["parameters"]
 
 
 def test_generation_overrides_apply_to_both_channels() -> None:

@@ -23,7 +23,6 @@ from . import assets as asset_lib
 from . import payload as payload_builder
 from . import storage
 from .http import ApiRequestError, NovelAIHttpClient, RateLimitedError
-from .models import get_model_profile
 from .queue import SerialTaskQueue
 from .settings import EngineSettings
 from .types import (
@@ -171,7 +170,7 @@ class ImageEngine:
         """
         effective_model = spec.model or self._settings.model
         try:
-            profile = get_model_profile(effective_model)
+            profile = self._settings.model_profile(effective_model)
         except ValueError as error:
             return ImageResult.failure(str(error))
 
@@ -219,7 +218,7 @@ class ImageEngine:
         """
         effective_model = spec.model or self._settings.model
         try:
-            get_model_profile(effective_model)
+            self._settings.model_profile(effective_model)
         except ValueError as error:
             return ImageResult.failure(str(error))
         if effective_model not in self._settings.allowed_models:
@@ -563,7 +562,7 @@ class ImageEngine:
             always + LLM 自选 + 用户手动加载的 Vibe
         """
         effective_model = spec.model or self._settings.model
-        if not EngineSettings.check_supports_vibes(effective_model):
+        if not self._settings.model_profile(effective_model).supports_vibe:
             return ()
 
         collected: list[VibeAsset] = []
