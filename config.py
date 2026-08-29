@@ -182,6 +182,32 @@ class ImageGeneratorConfig(BaseConfig):
 
         return sanitized_data
 
+    @model_validator(mode="after")
+    def validate_generation_models(self) -> ImageGeneratorConfig:
+        """校验默认模型与 Bot 可选模型白名单。"""
+
+        from .engine.models import GENERATION_MODELS
+
+        default_model = self.generation.model.strip()
+        available_models = [
+            model.strip()
+            for model in self.generation.available_models
+            if model.strip()
+        ]
+        invalid_models = [
+            model
+            for model in [default_model, *available_models]
+            if model not in GENERATION_MODELS
+        ]
+        if invalid_models:
+            raise ValueError(
+                "仅支持 V4.5/V5 生图模型："
+                + ", ".join(dict.fromkeys(invalid_models))
+            )
+        if available_models and default_model not in available_models:
+            raise ValueError("available_models 必须包含 generation.model 默认模型")
+        return self
+
     @config_section("plugin")
     class PluginSection(SectionBase):
         """插件基础配置。"""
@@ -312,14 +338,14 @@ class ImageGeneratorConfig(BaseConfig):
             description=(
                 "Bot 可选的模型列表。列表不为空时，Bot 可在 draw_image 调用中通过 model 参数"
                 "指定使用哪个模型生成。列表为空则禁用模型选择，始终使用默认模型。\n"
-                "注意：列表中应包含默认模型，否则 Bot 只能显式指定才能使用列表中的模型。"
+                "列表不为空时必须包含默认模型，且所有模型都必须在插件支持列表内。"
             ),
         )
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
             description=(
-                "噪声调度。可选：karras（默认，V4/V5 推荐）、exponential、"
-                "polyexponential、native（仅 V3 模型，插件自动切换）。"
+                "噪声调度。可选：karras（默认，V4.5/V5 推荐）、exponential、"
+                "polyexponential、native。"
             ),
         )
         resolution: Literal["1024x1024", "1216x832", "832x1216"] = Field(
@@ -486,15 +512,6 @@ class ImageGeneratorConfig(BaseConfig):
             ge=0.01,
             le=1.0,
             description="图生图默认强度",
-        )
-        max_characters: int = Field(
-            default=6,
-            ge=1,
-            le=6,
-            description=(
-                "单次生图允许的最大角色数（NovelAI Web UI multi-character workspace 默认上限为 6，"
-                "超过该数量会被拒绝；V5 与 V4/V4.5 系列模型支持多人物，V3 调用多人物会直接报错）。"
-            ),
         )
 
     @config_section("prompt")

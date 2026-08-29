@@ -61,6 +61,7 @@ def config_to_payload(
         },
         "generation": {
             "model": config.generation.model,
+            "availableModels": config.generation.available_models,
             "noiseSchedule": config.generation.noise_schedule,
             "resolution": config.generation.resolution,
             "steps": config.generation.steps,
@@ -171,6 +172,12 @@ def apply_overrides(
     for key, (attribute, caster) in _GENERATION_FIELDS.items():
         if key in generation:
             setattr(config.generation, attribute, caster(generation[key]))
+    if "availableModels" in generation:
+        config.generation.available_models = [
+            str(model).strip()
+            for model in generation["availableModels"]
+            if str(model).strip()
+        ]
 
     prompt = overrides.get("prompt", {})
     if "customInstructions" in prompt:
@@ -299,8 +306,12 @@ async def generate_preview(
     prompt: str,
     negative_prompt: str = "",
     resolution: str = "832x1216",
+    model: str = "",
+    steps: int | None = None,
     scale: float | None = None,
     cfg_rescale: float | None = None,
+    variety_plus: bool | None = None,
+    render_text: bool = False,
     selected_vibes: list[str] | None = None,
 ) -> dict[str, Any]:
     """走生图队列出一张预览图。
@@ -310,8 +321,12 @@ async def generate_preview(
         prompt: 正面提示词
         negative_prompt: 额外负面提示词
         resolution: 画幅文本
+        model: 本次使用的生图模型，留空使用默认模型
+        steps: 临时覆盖采样步数
         scale: 临时覆盖引导比例
         cfg_rescale: 临时覆盖 cfg_rescale
+        variety_plus: 临时覆盖 Variety+
+        render_text: 是否需要生成画面文字
         selected_vibes: 选择的 Vibe 名称
 
     Returns:
@@ -321,6 +336,8 @@ async def generate_preview(
     width, height = parse_resolution(resolution)
     actual_scale = scale if scale is not None else settings.scale
     actual_cfg_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
+    actual_model = model.strip() or settings.model
+    actual_steps = steps if steps is not None else settings.steps
 
     result = await engine.generate(
         GenerationSpec(
@@ -329,8 +346,12 @@ async def generate_preview(
             negative_prompt=negative_prompt or None,
             width=width,
             height=height,
+            model=model.strip() or None,
+            steps=steps,
             scale=scale,
             cfg_rescale=cfg_rescale,
+            variety_plus=variety_plus,
+            render_text=render_text,
             selected_vibe_names=tuple(selected_vibes or ()),
         )
     )
@@ -338,6 +359,8 @@ async def generate_preview(
     payload: dict[str, Any] = {
         "imageDataUrl": None,
         "prompt": prompt,
+        "actualModel": actual_model,
+        "actualSteps": actual_steps,
         "actualScale": actual_scale,
         "actualCfgRescale": actual_cfg_rescale,
         "actualResolution": f"{width}x{height}",

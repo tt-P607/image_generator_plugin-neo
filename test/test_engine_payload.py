@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+
 from image_generator_plugin_neo.config import ImageGeneratorConfig
+from image_generator_plugin_neo.engine.engine import ImageEngine
 from image_generator_plugin_neo.engine import payload as payload_builder
 from image_generator_plugin_neo.engine.settings import EngineSettings
 from image_generator_plugin_neo.engine.types import (
@@ -26,6 +31,46 @@ def make_settings(**overrides: object) -> EngineSettings:
     values = {field: getattr(settings, field) for field in settings.__slots__}
     values.update(overrides)
     return EngineSettings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_engine_uses_official_character_limit_from_selected_model() -> None:
+    """验证 V5 可使用 22 个角色且不会再受全局配置限制。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-full"
+    config.generation.available_models = [
+        "nai-diffusion-5-full",
+        "nai-diffusion-4-5-full",
+    ]
+    engine = ImageEngine(config)
+    engine._submit = AsyncMock(return_value=object())  # type: ignore[method-assign]
+    v5_characters = tuple(
+        CharacterPrompt(prompt=f"character {index}") for index in range(22)
+    )
+
+    await engine.generate(
+        GenerationSpec(
+            prompt="group",
+            user_id="tester",
+            characters=v5_characters,
+        )
+    )
+    engine._submit.assert_awaited_once()
+
+    too_many_v45 = tuple(
+        CharacterPrompt(prompt=f"character {index}") for index in range(7)
+    )
+    result = await engine.generate(
+        GenerationSpec(
+            prompt="group",
+            user_id="tester",
+            model="nai-diffusion-4-5-full",
+            characters=too_many_v45,
+        )
+    )
+    assert result.success is False
+    assert "官方限制" in result.message
 
 
 def test_gateway_root_normalizes_v1_suffix() -> None:
@@ -107,6 +152,34 @@ def test_official_generation_fills_v4_multi_character_fields() -> None:
     assert parameters["v4_prompt"]["caption"]["char_captions"][1]["char_caption"] == (
         "1girl, blue hair"
     )
+
+
+def test_v5_character_positions_preserve_continuous_coordinates() -> None:
+    """验证 V5 双渠道原样保留非 5×5 网格的自由小数坐标。"""
+
+    settings = make_settings(model="nai-diffusion-5-full")
+    spec = GenerationSpec(
+        prompt="2girls, outdoor",
+        user_id="tester",
+        characters=(
+            CharacterPrompt(prompt="1girl, red hair", x=0.17, y=0.43),
+            CharacterPrompt(prompt="1girl, blue hair", x=0.86, y=0.72),
+        ),
+    )
+
+    official = payload_builder.build_official_generation(settings, spec, ())
+    gateway = payload_builder.build_gateway_generation(settings, spec)
+
+    assert official["parameters"]["characterPrompts"][0]["center"] == {
+        "x": 0.17,
+        "y": 0.43,
+    }
+    assert official["parameters"]["characterPrompts"][1]["center"] == {
+        "x": 0.86,
+        "y": 0.72,
+    }
+    assert gateway["params"]["characters"][0]["position"] == [0.17, 0.43]
+    assert gateway["params"]["characters"][1]["position"] == [0.86, 0.72]
 
 
 def test_official_generation_switches_to_img2img() -> None:
@@ -312,6 +385,25 @@ def test_vibe_asset_carries_optional_name() -> None:
     assert named.name == "日系块面厚涂概念插画风"
 
 
+def test_vibe_model_uses_supported_model_from_whitelist() -> None:
+    """验证默认 V5 时会从白名单中选择 V4.5 作为 Vibe 编码模型。"""
+
+    settings = make_settings(
+        model="nai-diffusion-5-curated",
+        available_models=(
+            "nai-diffusion-5-curated",
+            "nai-diffusion-4-5-full",
+        ),
+    )
+    assert settings.vibe_model == "nai-diffusion-4-5-full"
+
+    v5_only = make_settings(
+        model="nai-diffusion-5-curated",
+        available_models=("nai-diffusion-5-curated",),
+    )
+    assert v5_only.vibe_model is None
+
+
 def test_rule_reminder_switch_defaults_off() -> None:
     """验证生图规则注入开关默认关闭。"""
 
@@ -400,6 +492,68 @@ def test_official_generation_per_request_model_switches_schema() -> None:
     assert body["model"] == "nai-diffusion-3"
     assert body["parameters"]["noise_schedule"] == "native"
     assert "v4_prompt" not in body["parameters"]
+
+
+def test_generation_overrides_apply_to_both_channels() -> None:
+    """验证调用级参数会同时覆盖 Official 与 Gateway 的全局配置。"""
+
+    spec = GenerationSpec(
+        prompt='1girl, holding sign, "Welcome"',
+        user_id="tester",
+        steps=24,
+        scale=6.0,
+        cfg_rescale=0.2,
+        variety_plus=True,
+        render_text=True,
+    )
+    settings = make_settings(
+        steps=28,
+        scale=5.0,
+        cfg_rescale=0.0,
+        variety_plus=False,
+    )
+
+    official = payload_builder.build_official_generation(settings, spec, ())
+    official_params = official["parameters"]
+    assert official_params["steps"] == 24
+    assert official_params["scale"] == 6.0
+    assert official_params["cfg_rescale"] == 0.2
+    assert official_params["skip_cfg_above_sigma"] == 58
+    assert "text" not in {
+        tag.strip().lower()
+        for tag in official_params["negative_prompt"].split(",")
+    }
+
+    gateway = payload_builder.build_gateway_generation(settings, spec)
+    gateway_params = gateway["params"]
+    assert gateway_params["steps"] == 24
+    assert gateway_params["scale"] == 6.0
+    assert gateway_params["cfg_rescale"] == 0.2
+    assert gateway_params["variety_boost"] is True
+    assert "text" not in {
+        tag.strip().lower()
+        for tag in gateway_params["negative_prompt"].split(",")
+    }
+
+
+async def test_empty_model_list_allows_only_default_model() -> None:
+    """验证空白名单表示仅允许默认模型，不会放开任意模型。"""
+
+    config = ImageGeneratorConfig()
+    assert EngineSettings.from_config(config).allowed_models == (
+        "nai-diffusion-5-curated",
+    )
+
+    engine = ImageEngine(config)
+    result = await engine.generate(
+        GenerationSpec(
+            prompt="1girl",
+            user_id="tester",
+            model="nai-diffusion-4-5-full",
+        )
+    )
+    assert result.success is False
+    assert "不在可选列表" in result.message
 
 
 def test_v5_multi_character_payload_keeps_structured_fields() -> None:

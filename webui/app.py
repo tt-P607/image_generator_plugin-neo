@@ -33,8 +33,12 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     negative_prompt: str = Field(default="", max_length=20000)
     resolution: str = Field(default="832x1216", pattern=r"^\d{2,5}x\d{2,5}$")
+    model: str = Field(default="", max_length=128)
+    steps: int | None = Field(default=None, ge=1, le=50)
     scale: float | None = Field(default=None, ge=1.0, le=10.0)
     cfg_rescale: float | None = Field(default=None, ge=0.0, le=1.0)
+    variety_plus: bool | None = None
+    render_text: bool = False
     selected_vibes: list[str] | None = Field(default=None, max_length=16)
 
 
@@ -110,8 +114,12 @@ def create_app(
             prompt=request.prompt,
             negative_prompt=request.negative_prompt,
             resolution=request.resolution,
+            model=request.model,
+            steps=request.steps,
             scale=request.scale,
             cfg_rescale=request.cfg_rescale,
+            variety_plus=request.variety_plus,
+            render_text=request.render_text,
             selected_vibes=request.selected_vibes,
         )
         if result["imageDataUrl"] is None:

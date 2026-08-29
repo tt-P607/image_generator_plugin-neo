@@ -84,6 +84,28 @@ def test_config_rejects_invalid_values() -> None:
     with pytest.raises(ValidationError):
         ImageGeneratorConfig.model_validate(raw)
 
+
+def test_config_enforces_generation_model_whitelist() -> None:
+    """验证模型白名单只接受 V4.5/V5 生图模型且必须包含默认模型。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["model"] = "nai-diffusion-future"
+    with pytest.raises(ValidationError, match="仅支持 V4.5/V5 生图模型"):
+        ImageGeneratorConfig.model_validate(raw)
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["available_models"] = ["nai-diffusion-4-5-full"]
+    with pytest.raises(ValidationError, match="必须包含"):
+        ImageGeneratorConfig.model_validate(raw)
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["generation"]["available_models"] = [
+        "nai-diffusion-5-curated",
+        "nai-diffusion-5-full-inpainting",
+    ]
+    with pytest.raises(ValidationError, match="仅支持 V4.5/V5 生图模型"):
+        ImageGeneratorConfig.model_validate(raw)
+
     raw = ImageGeneratorConfig().model_dump(mode="python")
     raw["api"]["channel"] = "unknown"
     with pytest.raises(ValidationError):

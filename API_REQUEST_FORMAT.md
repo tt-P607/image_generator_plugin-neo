@@ -8,6 +8,17 @@
 config/plugins/image_generator_plugin-neo/config.toml
 ```
 
+## 模型选择
+
+插件只接受以下文生图模型，并在引擎层执行严格白名单校验：
+
+- `nai-diffusion-5-full`
+- `nai-diffusion-5-curated`
+- `nai-diffusion-4-5-full`
+- `nai-diffusion-4-5-curated`
+
+单次请求的 `model`、`steps`、`scale`、`cfg_rescale` 和 `variety_plus` 会覆盖配置默认值。V5 支持画面文字与原生 Alpha，但不支持 Vibe 和 Director Reference；V4.5 支持这两类参考素材。局部重绘会按模型档案映射到对应 `*-inpainting` ID。
+
 ## 渠道选择
 
 ```toml
@@ -91,7 +102,7 @@ Accept: application/zip
 }
 ```
 
-V3 模型不发送 `v4_prompt`、`v4_negative_prompt` 和其他 V4/V5 专用字段。
+插件当前仅支持 V4.5 与 V5，二者都发送结构化提示词字段。
 
 ### 多人物
 
@@ -196,7 +207,7 @@ POST https://image.novelai.net/ai/encode-vibe
 {
   "image": "<base64>",
   "information_extracted": 1.0,
-  "model": "nai-diffusion-5-curated"
+  "model": "nai-diffusion-4-5-curated"
 }
 ```
 

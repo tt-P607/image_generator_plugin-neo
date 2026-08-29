@@ -52,7 +52,7 @@ MODEL_ENCODING_KEYS: dict[str, str] = {
     "nai-diffusion-3-furry-inpainting": "v3",
 }
 
-VibeEncoder = Callable[[str, float], Awaitable[str | None]]
+VibeEncoder = Callable[[str, float, str], Awaitable[str | None]]
 
 
 def read_source_image(file_path: Path) -> str:
@@ -105,8 +105,6 @@ def read_preencoded_vector(file_path: Path, model: str) -> str | None:
 
     key = MODEL_ENCODING_KEYS.get(model)
     model_encodings = encodings.get(key) if key else None
-    if not model_encodings:
-        model_encodings = next(iter(encodings.values()))
     if not isinstance(model_encodings, dict) or not model_encodings:
         return None
 
@@ -208,23 +206,41 @@ class AssetLibrary:
             always_items: always Vibe 配置项
             selectable_items: selectable Vibe 配置项
             director_items: 精密参考配置项
-            encoder: Vibe 编码回调，签名为 (图片 base64, IE) -> 向量或 None
+            encoder: Vibe 编码回调，签名为 (图片 base64, IE, 模型) -> 向量或 None
         """
         self.clear()
         if not settings.api_keys:
             logger.warning("未配置 API Key，跳过素材加载")
             return
 
-        if settings.vibe_always_enabled:
-            loaded = await self._load_vibes(settings, always_items, encoder)
+        vibe_model = settings.vibe_model
+        if settings.vibe_always_enabled and vibe_model:
+            loaded = await self._load_vibes(
+                settings,
+                always_items,
+                encoder,
+                vibe_model,
+            )
             self._always_vibes = [asset for _, asset in loaded]
             logger.info(f"always Vibe 加载完成，共 {len(self._always_vibes)} 个")
 
-        selectable = await self._load_vibes(settings, selectable_items, encoder)
-        self._selectable_vibes = {name: asset for name, asset in selectable}
-        logger.info(f"可选 Vibe 池加载完成，共 {len(self._selectable_vibes)} 个")
+        if vibe_model:
+            selectable = await self._load_vibes(
+                settings,
+                selectable_items,
+                encoder,
+                vibe_model,
+            )
+            self._selectable_vibes = {name: asset for name, asset in selectable}
+            logger.info(f"可选 Vibe 池加载完成，共 {len(self._selectable_vibes)} 个")
+        elif always_items or selectable_items:
+            logger.info("模型白名单中没有支持 Vibe 的 V4.5 模型，跳过 Vibe 加载")
 
-        self._director_refs = self._load_director_refs(settings, director_items)
+        self._director_refs = (
+            self._load_director_refs(settings, director_items)
+            if vibe_model
+            else {}
+        )
         logger.info(f"精密参考池加载完成，共 {len(self._director_refs)} 个")
 
     async def _load_vibes(
@@ -232,6 +248,7 @@ class AssetLibrary:
         settings: EngineSettings,
         items: Sequence[VibeItemConfig],
         encoder: VibeEncoder,
+        model: str,
     ) -> list[tuple[str, VibeAsset]]:
         """加载一组 Vibe 配置项。
 
@@ -239,6 +256,7 @@ class AssetLibrary:
             settings: 引擎配置快照
             items: Vibe 配置项
             encoder: Vibe 编码回调
+            model: 本次 Vibe 向量所属的精确模型 ID
 
         Returns:
             (素材名, 素材) 列表，素材名取文件名主干
@@ -253,7 +271,7 @@ class AssetLibrary:
                 continue
 
             try:
-                vector = read_preencoded_vector(file_path, settings.model)
+                vector = read_preencoded_vector(file_path, model)
                 if vector:
                     logger.info(f"已加载预编码 Vibe（不消耗 Anlas）: {item.file}")
                 else:
@@ -261,7 +279,7 @@ class AssetLibrary:
                     if not source:
                         logger.warning(f"Vibe 文件读取为空，跳过: {item.file}")
                         continue
-                    vector = await encoder(source, item.ie)
+                    vector = await encoder(source, item.ie, model)
                     if not vector:
                         logger.warning(f"Vibe 编码失败，跳过: {item.file}")
                         continue

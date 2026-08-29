@@ -23,6 +23,7 @@ from . import assets as asset_lib
 from . import payload as payload_builder
 from . import storage
 from .http import ApiRequestError, NovelAIHttpClient, RateLimitedError
+from .models import get_model_profile
 from .queue import SerialTaskQueue
 from .settings import EngineSettings
 from .types import (
@@ -169,26 +170,40 @@ class ImageEngine:
             执行结果
         """
         effective_model = spec.model or self._settings.model
+        try:
+            profile = get_model_profile(effective_model)
+        except ValueError as error:
+            return ImageResult.failure(str(error))
 
-        # 校验指定模型是否在可选列表中
-        if spec.model and self._settings.available_models:
-            if spec.model not in self._settings.available_models:
-                return ImageResult.failure(
-                    f"模型 {spec.model!r} 不在可选列表中，"
-                    f"可用模型：{', '.join(self._settings.available_models)}"
-                )
+        if effective_model not in self._settings.allowed_models:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不在可选列表中，"
+                f"可用模型：{', '.join(self._settings.allowed_models)}"
+            )
+
+        if spec.steps is not None and not 1 <= spec.steps <= 50:
+            return ImageResult.failure("steps 必须在 1~50 之间")
+        if spec.scale is not None and not 1.0 <= spec.scale <= 10.0:
+            return ImageResult.failure("guidance 必须在 1.0~10.0 之间")
+        if spec.cfg_rescale is not None and not 0.0 <= spec.cfg_rescale <= 1.0:
+            return ImageResult.failure("pgr 必须在 0.0~1.0 之间")
+
+        if spec.selected_vibe_names and not profile.supports_vibe:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持 Vibe，请选择 V4.5 模型"
+            )
+        if spec.director_refs and not profile.supports_director_reference:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持 Director Reference，请选择 V4.5 模型"
+            )
 
         if spec.characters:
-            if not EngineSettings.check_is_v4_or_v5(effective_model):
-                return ImageResult.failure(
-                    f"当前模型 {effective_model!r} 不支持多人物生图（仅 V4/V5 系列支持），"
-                    "请先把 generation.model 切到 nai-diffusion-4-* 或 nai-diffusion-5-* 后再试"
-                )
-            if len(spec.characters) > self._settings.max_characters:
+            character_limit = profile.max_characters
+            if len(spec.characters) > character_limit:
                 return ImageResult.failure(
                     f"角色数量 {len(spec.characters)} 超过上限 "
-                    f"{self._settings.max_characters}，"
-                    "请合并角色或调高 advanced.max_characters 配置"
+                    f"{character_limit}（{profile.family} 模型官方限制），"
+                    "请减少或合并角色"
                 )
 
         return await self._submit(lambda: self._run_generate(spec))
@@ -202,6 +217,22 @@ class ImageEngine:
         Returns:
             执行结果
         """
+        effective_model = spec.model or self._settings.model
+        try:
+            get_model_profile(effective_model)
+        except ValueError as error:
+            return ImageResult.failure(str(error))
+        if effective_model not in self._settings.allowed_models:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不在可选列表中，"
+                f"可用模型：{', '.join(self._settings.allowed_models)}"
+            )
+        if spec.steps is not None and not 1 <= spec.steps <= 50:
+            return ImageResult.failure("steps 必须在 1~50 之间")
+        if spec.scale is not None and not 1.0 <= spec.scale <= 10.0:
+            return ImageResult.failure("guidance 必须在 1.0~10.0 之间")
+        if spec.cfg_rescale is not None and not 0.0 <= spec.cfg_rescale <= 1.0:
+            return ImageResult.failure("pgr 必须在 0.0~1.0 之间")
         return await self._submit(lambda: self._run_inpaint(spec))
 
     async def run_director_tool(self, spec: DirectorToolSpec) -> ImageResult:
@@ -368,7 +399,8 @@ class ImageEngine:
 
         params = (
             f"{spec.width}x{spec.height} | {effective_model} | "
-            f"steps={self._settings.steps} | scale={spec.scale if spec.scale is not None else self._settings.scale} | "
+            f"steps={spec.steps if spec.steps is not None else self._settings.steps} | "
+            f"scale={spec.scale if spec.scale is not None else self._settings.scale} | "
             f"rescale={spec.cfg_rescale if spec.cfg_rescale is not None else self._settings.cfg_rescale} | "
             f"sampler={self._settings.sampler}"
         )
@@ -588,12 +620,14 @@ class ImageEngine:
         self,
         image_b64: str,
         information_extracted: float,
+        model: str,
     ) -> str | None:
         """调用 encode-vibe 端点把原图编码为可复用向量。
 
         Args:
             image_b64: 原始图片 base64
             information_extracted: 信息提取量
+            model: Vibe 向量所属的精确 V4.5 模型 ID
 
         Returns:
             编码向量 base64，失败时返回 None
@@ -607,6 +641,7 @@ class ImageEngine:
             self._settings,
             image_b64,
             information_extracted,
+            model,
         )
 
         try:
@@ -720,9 +755,17 @@ class ImageEngine:
         if not source:
             return False, "文件数据无效或未找到 image 字段"
 
-        vector = asset_lib.read_preencoded_vector(file_path, self._settings.model)
+        vibe_model = self._settings.vibe_model
+        if vibe_model is None:
+            return False, "当前模型白名单中没有支持 Vibe 的 V4.5 模型"
+
+        vector = asset_lib.read_preencoded_vector(file_path, vibe_model)
         if not vector:
-            vector = await self._encode_vibe(source, DEFAULT_MANUAL_VIBE_IE)
+            vector = await self._encode_vibe(
+                source,
+                DEFAULT_MANUAL_VIBE_IE,
+                vibe_model,
+            )
         if not vector:
             return False, "Vibe 编码失败，请检查 API Key 和网络连接"
 

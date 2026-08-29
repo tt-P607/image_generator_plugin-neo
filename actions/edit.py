@@ -38,7 +38,8 @@ class EditImageAction(BaseImageAction):
         "  0.01-1.0，越高越偏离原图。\n"
         "  轻微调整建议 0.3-0.5，风格转换建议 0.5-0.7，大改建议 0.7-0.9。\n\n"
         "**提示词规范**：\n"
-        "  content_description 描述重绘后整张图的内容（英文 NovelAI 标签），\n"
+        "  content_description 描述重绘后整张图的完整内容，并遵守所选模型的提示词规则；\n"
+        "  V4.5 使用英文 NovelAI 标签，V5 可混合英文 Tag 与中、日、英文自然语言。\n"
         "  建议在原图内容基础上增删，保留想维持的元素标签。\n\n"
         "**文件名规范**：\n"
         "  出图成功后返回值包含文件名，后续可通过 image_filename 引用此图片。\n"
@@ -49,7 +50,7 @@ class EditImageAction(BaseImageAction):
         self,
         content_description: Annotated[
             str,
-            "重绘后整张图片的英文 NovelAI 标签描述。"
+            "重绘后整张图片的完整描述，语言与语法须匹配所选模型。"
             "建议在原图内容基础上增删，保留想维持的元素标签。",
         ],
         strength: Annotated[
@@ -57,6 +58,27 @@ class EditImageAction(BaseImageAction):
             "重绘强度 0.01-1.0。越高越偏离原图。"
             "轻微调整 0.3-0.5，风格转换 0.5-0.7，大改 0.7-0.9。",
         ] = 0.7,
+        model: Annotated[
+            str,
+            "生图模型名称，必须来自 draw_image 描述中的可选模型列表；留空使用默认模型。",
+        ] = "",
+        guidance: Annotated[
+            float | None,
+            "可选 Prompt Guidance，默认留空使用配置值。仅在结果明显不遵循提示词时覆盖，"
+            "建议范围 4.5~6.5。",
+        ] = None,
+        pgr: Annotated[
+            float | None,
+            "可选 PGR，默认留空使用配置值。通常不调整；仅在高 Guidance 导致过曝时覆盖，范围 0~1。",
+        ] = None,
+        variety_plus: Annotated[
+            bool | None,
+            "是否覆盖 Variety+，默认留空使用配置值。仅在明确需要更多构图变化时设 true。",
+        ] = None,
+        render_text: Annotated[
+            bool,
+            "重绘结果是否需要可读文字；需要时设 true。",
+        ] = False,
         negative_prompt: Annotated[
             str,
             "场景专属额外排除词，英文逗号分隔。",
@@ -114,6 +136,11 @@ class EditImageAction(BaseImageAction):
             negative_prompt=negative_prompt or None,
             width=width,
             height=height,
+            model=model.strip() or None,
+            scale=guidance,
+            cfg_rescale=pgr,
+            variety_plus=variety_plus,
+            render_text=render_text,
             source_image=image_ops.strip_data_url_prefix(image_b64),
             strength=max(0.01, min(1.0, strength)),
         )

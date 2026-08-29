@@ -24,7 +24,8 @@ class ImageGeneratorCommand(BaseImageCommand):
       /nai_image draw 横图 <提示词>         - 横图 (1216x832)
       /nai_image draw 人物 <提示词>         - 套用人物预设
       /画图 <提示词> 负面: <负面词>          - 中文别名与负面词
-      追加 --scale 7 --rescale 0.5 可覆盖引导参数
+    追加 --model <模型ID> --steps 28 --scale 7 --rescale 0.5 可覆盖生成参数
+    需要画面文字时追加 --render-text；复杂构图可用 --variety-plus true
     """
 
     name: str = "nai_image"
@@ -57,7 +58,8 @@ class ImageGeneratorCommand(BaseImageCommand):
             await self.reply("服务还没准备好呢，稍等一下")
             return False, "引擎未初始化"
 
-        flags = parsing.extract_scale_flags(raw_text)
+        generation_flags = parsing.extract_generation_flags(raw_text)
+        flags = parsing.extract_scale_flags(generation_flags.remainder)
         tokens = flags.remainder.split()
         if not tokens:
             await self.reply(replies.pick(replies.MISSING_PROMPT_HINTS, "missing_prompt"))
@@ -105,6 +107,10 @@ class ImageGeneratorCommand(BaseImageCommand):
             height=size[1],
             scale=flags.scale,
             cfg_rescale=flags.cfg_rescale,
+            model=generation_flags.model,
+            steps=generation_flags.steps,
+            variety_plus=generation_flags.variety_plus,
+            render_text=generation_flags.render_text,
             from_command=True,
         )
 
@@ -159,7 +165,8 @@ class ImageEditCommand(BaseImageCommand):
             await self.reply("服务还没准备好呢，稍等一下")
             return False, "引擎未初始化"
 
-        tokens = raw_text.split()
+        generation_flags = parsing.extract_generation_flags(raw_text)
+        tokens = generation_flags.remainder.split()
         if not tokens:
             await self.reply("想改图的话，先引用一张图片然后告诉我怎么改")
             return False, "缺少参数"
@@ -180,6 +187,10 @@ class ImageEditCommand(BaseImageCommand):
         spec = GenerationSpec(
             prompt=prompt,
             user_id=self.user_scope,
+            model=generation_flags.model,
+            steps=generation_flags.steps,
+            variety_plus=generation_flags.variety_plus,
+            render_text=generation_flags.render_text,
             source_image=image_b64,
             strength=strength,
             from_command=True,
@@ -249,7 +260,8 @@ class ImageReferenceCommand(BaseImageCommand):
             await self.reply("需要引用一张图片才能精确参考哦，回复一张图片再发命令试试")
             return False, "未找到引用图片"
 
-        reference_flags = parsing.extract_reference_flags(raw_text)
+        generation_flags = parsing.extract_generation_flags(raw_text)
+        reference_flags = parsing.extract_reference_flags(generation_flags.remainder)
         scale_flags = parsing.extract_scale_flags(reference_flags.remainder)
         prompt, negative_prompt = parsing.split_prompt(scale_flags.remainder)
         if not prompt:
@@ -273,6 +285,10 @@ class ImageReferenceCommand(BaseImageCommand):
             negative_prompt=negative_prompt,
             scale=scale_flags.scale,
             cfg_rescale=scale_flags.cfg_rescale,
+            model=generation_flags.model or engine.settings.vibe_model,
+            steps=generation_flags.steps,
+            variety_plus=generation_flags.variety_plus,
+            render_text=generation_flags.render_text,
             director_refs=(
                 DirectorRefAsset(
                     data=image_b64,

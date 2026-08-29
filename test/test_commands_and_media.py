@@ -5,13 +5,14 @@ from __future__ import annotations
 import base64
 import io
 from pathlib import Path
-from typing import cast
+from typing import cast, get_type_hints
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image, PngImagePlugin
 
 from image_generator_plugin_neo.commands import parsing
 from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
+from image_generator_plugin_neo.actions.draw import DrawAction
 from image_generator_plugin_neo.descriptions import build_draw_description
 from image_generator_plugin_neo.engine import storage
 from image_generator_plugin_neo.media import extract_image_by_media_id, image_ops
@@ -34,6 +35,20 @@ def test_extract_scale_flags_keeps_zero_value() -> None:
     assert flags.scale == 7.0
     assert flags.cfg_rescale == 0.0
     assert flags.remainder == "1girl"
+
+
+def test_extract_generation_flags_removes_only_explicit_options() -> None:
+    """验证命令模型与生成策略参数会被提取且不污染提示词。"""
+
+    flags = parsing.extract_generation_flags(
+        '1girl, holding sign "Hello" --model nai-diffusion-5-full '
+        "--steps 24 --variety-plus true --render-text"
+    )
+    assert flags.model == "nai-diffusion-5-full"
+    assert flags.steps == 24
+    assert flags.variety_plus is True
+    assert flags.render_text is True
+    assert flags.remainder == '1girl, holding sign "Hello"'
 
 
 def test_split_prompt_supports_fullwidth_colon() -> None:
@@ -206,7 +221,7 @@ def test_draw_description_hides_skip_hint_when_forced() -> None:
 
 
 def test_draw_description_detects_and_injects_v5_model() -> None:
-    """验证 V5 模型时自动注入模型名与 V5 专属规范，且不暴露 Vibe/精密参考列表。"""
+    """验证 V5 模型说明覆盖完整专属能力，且不暴露参考素材列表。"""
 
     from image_generator_plugin_neo.config import DirectorReferenceItemConfig, VibeItemConfig
 
@@ -225,8 +240,31 @@ def test_draw_description_detects_and_injects_v5_model() -> None:
 
     assert "【默认生图模型（不指定 model 参数时生效）】" in desc
     assert "nai-diffusion-5-curated" in desc
-    assert "NovelAI V5 架构" in desc
-    assert "“你好，世界！”" in desc
+    assert "NovelAI V5 Curated 专属规则" in desc
+    assert "1471 Tokens" in desc
+    assert "1.3~1.8" in desc
+    assert "transparent background" in desc
+    assert "visual novel sprite" in desc
+    assert "版权角色硬上限 22" in desc
+    assert "最佳写法是混合提示词" in desc
+    assert "完整英语自然语言句子" in desc
+    assert "V5 不要求 V4.5 的 5×5 网格" in desc
+    assert "连续归一化坐标" in desc
+    assert "不要吸附或取整到 5×5 格点" in desc
+    assert "不要强制套用 source#/target#/mutual#" in desc
+    assert "visual novel bg 为纯背景" in desc
+    assert "Steps 固定使用管理员配置" in desc
+    assert "AI Action 不得覆盖" in desc
+    assert "默认也不覆盖配置" in desc
+    assert "Chunks 提示词收藏" in desc
+    assert "不要虚构 chunks 或 enhance_max 字段" in desc
+    assert "2026 年 7 月" in desc
+    assert "Gotoh Hitori" in desc
+    assert "「」" in desc
+    assert "padoru_(meme)" in desc
+    assert "three-panel comic page" in desc
+    assert "0.1~0.8" in desc
+    assert "不可完全重叠" in desc
     assert "TEXT:" not in desc
     # 验证 V5 架构下不向 LLM 暴露 Vibe 与精密参考列表
     assert "【可选 Vibe 画风列表" not in desc
@@ -242,22 +280,55 @@ def test_draw_description_detects_and_injects_v4_model() -> None:
 
     assert "【默认生图模型（不指定 model 参数时生效）】" in desc
     assert "nai-diffusion-4-5-full" in desc
-    assert "NovelAI V4 / V4.5 架构" in desc
+    assert "NovelAI V4.5 Full 专属规则" in desc
+    assert "505 Tokens" in desc
+    assert "2025 年 6 月" in desc
+    assert "1.1~1.4" in desc
     assert "TEXT:" in desc
-    assert "“你好，世界！”" not in desc
+    assert "5×5 网格站位" in desc
+    assert "V4.5 角色互动语法（仅 V4.5）" in desc
+    assert "transparent background" not in desc
 
 
-def test_draw_description_detects_and_injects_v3_model() -> None:
-    """验证 V3 模型时自动注入模型名与 V3 纯文本规范。"""
+def test_draw_description_includes_each_selectable_model_profile() -> None:
+    """验证默认模型与白名单模型的规则会同时提供给 Bot。"""
 
     config = ImageGeneratorConfig()
-    config.generation.model = "nai-diffusion-3"
+    config.generation.model = "nai-diffusion-4-5-full"
+    config.generation.available_models = [
+        "nai-diffusion-4-5-full",
+        "nai-diffusion-5-full",
+    ]
     desc = build_draw_description(config)
 
-    assert "【默认生图模型（不指定 model 参数时生效）】" in desc
-    assert "nai-diffusion-3" in desc
-    assert "NovelAI V3 架构" in desc
-    assert "纯文本标签" in desc
+    assert desc.count("nai-diffusion-4-5-full：NovelAI V4.5 Full 专属规则") == 1
+    assert desc.count("nai-diffusion-5-full：NovelAI V5 Full 专属规则") == 1
+
+
+def test_draw_prompt_parameter_follows_selected_model_language_rules() -> None:
+    """验证 Action 参数不再用静态注解禁止 V5 多语言提示词。"""
+
+    annotation = get_type_hints(DrawAction.execute, include_extras=True)[
+        "content_description"
+    ]
+    description = annotation.__metadata__[0]
+    assert "禁止中文" not in description
+    assert "V5 可混合英文 Tag 与多语言自然语言" in description
+    assert "英语自然语言描述复杂动作" in description
+
+
+def test_ai_actions_do_not_expose_steps_override() -> None:
+    """验证 AI Action 不能覆盖可能影响生成消耗的采样步数。"""
+
+    from image_generator_plugin_neo.actions.edit import EditImageAction
+    from image_generator_plugin_neo.actions.inpaint import InpaintAction
+
+    for action in (DrawAction, EditImageAction, InpaintAction):
+        parameters = get_type_hints(action.execute, include_extras=True)
+        assert "steps" not in parameters
+        assert "guidance" in parameters
+        assert "pgr" in parameters
+        assert "variety_plus" in parameters
 
 
 # ─── media_id 精确取图测试 ───

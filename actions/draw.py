@@ -35,9 +35,9 @@ class DrawAction(BaseImageAction):
         self,
         content_description: Annotated[
             str,
-            "图片内容的英文 NovelAI 标签，禁止中文。"
-            "权重语法：n::tag::（提升）/ n::tag::（降低）。"
-            "角色格式：character_name (source)；皮肤/来源精确拼写。",
+            "完整正面提示词。必须先选择 model，再按该模型在 Action 总描述中的专属语言、"
+            "权重、文字和能力规则组织；V4.5 使用英文标签，V5 可混合英文 Tag 与多语言自然语言，"
+            "但推荐以英文 Tag 建立主体，再用英语自然语言描述复杂动作、互动和空间关系，以获得最佳效果。",
         ],
         output_filename: Annotated[
             str,
@@ -50,6 +50,26 @@ class DrawAction(BaseImageAction):
             "图片画幅尺寸。横图用 '1216x832'，竖图用 '832x1216'，方图用 '1024x1024'。"
             "根据内容主体形态选择。",
         ] = DEFAULT_RESOLUTION,
+        guidance: Annotated[
+            float | None,
+            "可选 Prompt Guidance，默认留空使用配置值。仅当画面明显不遵循提示词或过度锐化时覆盖，"
+            "建议范围 4.5~6.5。",
+        ] = None,
+        pgr: Annotated[
+            float | None,
+            "可选 Prompt Guidance Rescale，默认留空使用配置值。通常不调整；仅在高 Guidance "
+            "导致过曝时考虑覆盖，范围 0~1。",
+        ] = None,
+        variety_plus: Annotated[
+            bool | None,
+            "是否覆盖 Variety+，默认留空使用配置值。仅在复杂动作、动态构图或漫画需要更多变化时设 true；"
+            "需要严格贴合提示词时才设 false。",
+        ] = None,
+        render_text: Annotated[
+            bool,
+            "画面是否需要可读文字。需要招牌、气泡、漫画台词等文字时必须设 true，"
+            "系统会避免通用负面词压制文字。",
+        ] = False,
         negative_prompt: Annotated[
             str,
             "场景专属额外排除词，英文逗号分隔。此处只填本次图片特有的排除内容。"
@@ -72,9 +92,10 @@ class DrawAction(BaseImageAction):
         ] = "",
         characters: Annotated[
             str,
-            "多人物 JSON 数组字符串（V5 与 V4/V4.5 模型均支持，仅 V3 不支持）。最多 6 个角色，每项 "
-            "{prompt, uc?, x?, y?}；x/y 为 0~1 浮点坐标。"
-            "互动用 source#/target#/mutual# 语法。单人物时留空。",
+            "多人物 JSON 数组字符串，每项 {prompt, uc?, x?, y?}，x/y 为 0~1 浮点坐标。"
+            "V4.5 最多 6 人并使用 source#/target#/mutual# 互动标签；V5 版权角色最多 22 人，"
+            "原创角色建议不超过 6 人；V5 的 x/y 可使用范围内任意小数自由定位，不要按 5×5 网格取整，"
+            "prompt 推荐混合英文 Tag 与英语自然语言。单人物时留空。",
         ] = "",
     ) -> tuple[bool, str]:
         """执行画图动作。"""
@@ -102,6 +123,10 @@ class DrawAction(BaseImageAction):
             negative_prompt=negative_prompt or None,
             width=width,
             height=height,
+            scale=guidance,
+            cfg_rescale=pgr,
+            variety_plus=variety_plus,
+            render_text=render_text,
             model=model.strip() or None,
             selected_vibe_names=_split_names(selected_vibes),
             director_refs=engine.assets.select_director_refs(

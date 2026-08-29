@@ -51,7 +51,7 @@ class InpaintAction(BaseImageAction):
         "**⚠️ 重绘提示词规范**（保证画风一致性）：\n"
         "  NovelAI 局部重绘没有独立的区域提示词，content_description 是整张图的完整提示词。\n"
         "  必须传入完整提示词（原图 tag + 修改），而不是只传修改部分。\n"
-        "  - 在原图完整 tag 基础上，仅对需要修改的部分进行增删，其余保持不变\n"
+        "  - 按所选模型的规则，在原图完整描述基础上仅修改目标部分，其余保持不变\n"
         "  - 例如换衣服：原图是 '1girl, white shirt, skirt, standing, looking at viewer'，\n"
         "    修改后传 '1girl, pink dress, frills, standing, looking at viewer'\n"
         "  - 画风标签（如 game cg）需保留，保持与原图一致\n"
@@ -65,7 +65,7 @@ class InpaintAction(BaseImageAction):
         self,
         content_description: Annotated[
             str,
-            "重绘后整张图片的完整英文 NovelAI 标签描述。"
+            "重绘后整张图片的完整描述，语言与语法须匹配所选模型。"
             "需在原图标签基础上增删，而不是只写修改部分。",
         ],
         mask_area: Annotated[
@@ -78,6 +78,28 @@ class InpaintAction(BaseImageAction):
             float,
             "重绘强度 0.01-1.0。越高越偏离原图。修小细节建议 0.3-0.5，大改建议 0.7-1.0。",
         ] = 0.7,
+        model: Annotated[
+            str,
+            "生图模型名称，必须来自 draw_image 描述中的可选模型列表；留空使用默认模型。",
+        ] = "",
+        guidance: Annotated[
+            float | None,
+            "可选 Prompt Guidance，默认留空使用配置值。仅在结果明显不遵循提示词时覆盖，"
+            "建议范围 4.5~6.5。",
+        ] = None,
+        pgr: Annotated[
+            float | None,
+            "可选 PGR，默认留空使用配置值。通常不调整；仅在高 Guidance 导致过曝时覆盖，范围 0~1。",
+        ] = None,
+        variety_plus: Annotated[
+            bool | None,
+            "是否覆盖 Variety+，默认留空使用配置值。局部修补通常不调整，"
+            "仅在明确需要更多变化时设 true。",
+        ] = None,
+        render_text: Annotated[
+            bool,
+            "重绘区域是否需要可读文字；需要时设 true。",
+        ] = False,
         negative_prompt: Annotated[
             str,
             "场景专属额外排除词，英文逗号分隔。",
@@ -147,6 +169,11 @@ class InpaintAction(BaseImageAction):
             width=width,
             height=height,
             strength=strength,
+            model=model.strip() or None,
+            scale=guidance,
+            cfg_rescale=pgr,
+            variety_plus=variety_plus,
+            render_text=render_text,
         )
 
         async def _work() -> ImageResult:

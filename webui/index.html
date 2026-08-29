@@ -132,6 +132,14 @@ select option { background: var(--panel); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-muted); }
+
+@media (max-width: 700px) {
+  .shell { padding: 16px 12px 48px; }
+  .panel { padding: 14px; }
+  .row { flex-direction: column; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .section-head { align-items: flex-start; gap: 8px; }
+}
 </style>
 </head>
 <body>
@@ -158,6 +166,10 @@ select option { background: var(--panel); }
       </div>
       <div class="grid-3" style="margin-bottom: 12px;">
         <div>
+          <label>模型</label>
+          <select id="genModel"></select>
+        </div>
+        <div>
           <label>画幅</label>
           <select id="genResolution">
             <option value="832x1216">竖图 832×1216</option>
@@ -166,12 +178,22 @@ select option { background: var(--panel); }
           </select>
         </div>
         <div>
+          <label>Steps（留空用配置值）</label>
+          <input type="number" id="genSteps" min="1" max="50" placeholder="28" />
+        </div>
+      </div>
+      <div class="grid-3" style="margin-bottom: 12px;">
+        <div>
           <label>Scale（留空用配置值）</label>
           <input type="number" id="genScale" step="0.1" placeholder="5.0" />
         </div>
         <div>
           <label>CFG Rescale（留空用配置值）</label>
           <input type="number" id="genRescale" step="0.1" placeholder="0.0" />
+        </div>
+        <div style="display:flex; flex-direction:column; justify-content:center; gap:8px; padding-top:18px">
+          <label class="toggle"><input type="checkbox" id="genVarietyPlus" /> Variety+</label>
+          <label class="toggle"><input type="checkbox" id="genRenderText" /> 需要画面文字</label>
         </div>
       </div>
       <div class="toolbar" style="margin-bottom:12px; gap:6px">
@@ -196,7 +218,12 @@ select option { background: var(--panel); }
     <div class="panel">
       <div class="section-head"><h2>生图参数</h2></div>
       <div class="grid-3" style="margin-bottom:12px">
-        <div><label>模型</label><input type="text" id="cfgModel" /></div>
+        <div><label>默认模型</label><select id="cfgModel">
+          <option value="nai-diffusion-5-curated">nai-diffusion-5-curated</option>
+          <option value="nai-diffusion-5-full">nai-diffusion-5-full</option>
+          <option value="nai-diffusion-4-5-curated">nai-diffusion-4-5-curated</option>
+          <option value="nai-diffusion-4-5-full">nai-diffusion-4-5-full</option>
+        </select></div>
         <div><label>采样器</label><select id="cfgSampler">
           <option value="k_euler_ancestral">k_euler_ancestral (推荐)</option>
           <option value="k_euler">k_euler</option>
@@ -212,6 +239,10 @@ select option { background: var(--panel); }
           <option value="karras">karras</option><option value="native">native</option>
           <option value="exponential">exponential</option><option value="polyexponential">polyexponential</option>
         </select></div>
+      </div>
+      <div style="margin-bottom:12px">
+        <label>Bot 可选模型白名单（英文逗号分隔；留空表示仅允许默认模型）</label>
+        <input type="text" id="cfgAvailableModels" placeholder="nai-diffusion-5-curated, nai-diffusion-4-5-full" />
       </div>
       <div class="grid-3" style="margin-bottom:12px">
         <div><label>默认分辨率</label><select id="cfgResolution">
@@ -323,10 +354,25 @@ var genCfgData = null;
   try {
     genCfgData = await api('/api/config');
     var g = genCfgData.generation || {};
+    fillGenerationModelOptions(g);
+    if (g.steps !== undefined) document.getElementById('genSteps').placeholder = String(g.steps);
     if (g.scale !== undefined) document.getElementById('genScale').placeholder = String(g.scale);
     if (g.promptGuidanceRescale !== undefined) document.getElementById('genRescale').placeholder = String(g.promptGuidanceRescale);
   } catch(e) {}
 })();
+
+function fillGenerationModelOptions(g) {
+  var select = document.getElementById('genModel');
+  var models = (g.availableModels && g.availableModels.length) ? g.availableModels : [g.model];
+  select.innerHTML = '';
+  models.filter(Boolean).forEach(function(model) {
+    var option = document.createElement('option');
+    option.value = model;
+    option.textContent = model + (model === g.model ? '（默认）' : '');
+    option.selected = model === g.model;
+    select.appendChild(option);
+  });
+}
 
 // 画画风标签增删
 var styleInPrompt = false;
@@ -375,7 +421,12 @@ document.getElementById('genBtn').addEventListener('click', async function() {
       prompt: prompt,
       negative_prompt: document.getElementById('genNegative').value.trim(),
       resolution: document.getElementById('genResolution').value,
+      model: document.getElementById('genModel').value,
+      variety_plus: document.getElementById('genVarietyPlus').checked,
+      render_text: document.getElementById('genRenderText').checked,
     };
+    var stepsVal = document.getElementById('genSteps').value.trim();
+    if (stepsVal) body.steps = parseInt(stepsVal);
     var scaleVal = document.getElementById('genScale').value.trim();
     if (scaleVal) body.scale = parseFloat(scaleVal);
     var rescaleVal = document.getElementById('genRescale').value.trim();
@@ -385,7 +436,9 @@ document.getElementById('genBtn').addEventListener('click', async function() {
     var scaleText = r.actualScale !== undefined ? r.actualScale : '-';
     var rescaleText = r.actualCfgRescale !== undefined ? r.actualCfgRescale : '-';
     var resText = r.actualResolution || '-';
-    document.getElementById('genStatus').textContent = '\u2705 出图成功 | Scale: ' + scaleText + ' | Rescale: ' + rescaleText + ' | ' + resText;
+    var modelText = r.actualModel || '-';
+    var stepsText = r.actualSteps !== undefined ? r.actualSteps : '-';
+    document.getElementById('genStatus').textContent = '\u2705 出图成功 | ' + modelText + ' | Steps: ' + stepsText + ' | Scale: ' + scaleText + ' | Rescale: ' + rescaleText + ' | ' + resText;
   } catch (e) {
     document.getElementById('genPreview').innerHTML = '\x3cdiv class="preview-placeholder"\x3e' + esc(e.message) + '\x3c/div\x3e';
     document.getElementById('genStatus').textContent = '\u274c 失败';
@@ -410,6 +463,7 @@ async function loadConfig() {
 function fillConfigForm(d) {
   const g = d.generation || {};
   document.getElementById('cfgModel').value = g.model || '';
+  document.getElementById('cfgAvailableModels').value = (g.availableModels || []).join(', ');
   document.getElementById('cfgSampler').value = g.sampler || '';
   document.getElementById('cfgNoiseSchedule').value = g.noiseSchedule || 'karras';
   document.getElementById('cfgResolution').value = g.resolution || '832x1216';
@@ -548,6 +602,7 @@ document.getElementById('cfgReloadBtn').addEventListener('click', loadConfig);
 function collectConfig() {
   const g = {
     model: v('cfgModel'), sampler: sel('cfgSampler'), noiseSchedule: sel('cfgNoiseSchedule'),
+    availableModels: v('cfgAvailableModels').split(',').map(m => m.trim()).filter(Boolean),
     resolution: sel('cfgResolution'), steps: intv('cfgSteps'), scale: floatv('cfgScale'),
     promptGuidanceRescale: floatv('cfgPromptRescale'), ucPreset: intv('cfgUcPreset'),
     varietyPlus: sel('cfgVarietyPlus')==='true', styleReference: v('cfgStyleReference'),

@@ -56,6 +56,11 @@ Gateway 需要支持本插件使用的 OpenAI 图片扩展接口，包括文生�
 ```toml
 [generation]
 model = "nai-diffusion-5-curated"
+available_models = [
+	"nai-diffusion-5-curated",
+	"nai-diffusion-5-full",
+	"nai-diffusion-4-5-full",
+]
 resolution = "1024x1024"
 steps = 28
 scale = 5.0
@@ -63,6 +68,15 @@ sampler = "k_euler_ancestral"
 noise_schedule = "karras"
 prompt_guidance_rescale = 0.0
 ```
+
+`available_models` 是 Bot 和 WebUI 可在单次调用中选择的严格白名单，非空时必须包含默认 `model`。留空则只允许默认模型。插件当前支持：
+
+| 模型 | 提示词与主要能力 | 限制 |
+|---|---|---|
+| `nai-diffusion-5-full` / `nai-diffusion-5-curated` | 1471 Tokens；英文 Tag 加中、日、英文自然语言；引号文字、原生 Alpha、控制词、视觉小说资产和漫画 | 不支持 Vibe 与 Director Reference |
+| `nai-diffusion-4-5-full` / `nai-diffusion-4-5-curated` | 505 Tokens；稳定的英文 Tag 工作流；支持 Vibe 与 Director Reference | 不支持 V5 原生 Alpha、控制词和多语言自然语言工作流 |
+
+Full 更适合精细控制，Curated 更偏稳定和审美一致。局部重绘会自动映射到同代 Inpainting 模型，不能把 `*-inpainting` 直接写入白名单。
 
 推荐画幅：
 
@@ -90,10 +104,10 @@ prompt_guidance_rescale = 0.0
 
 | 调度 ID | 说明 |
 |---------|------|
-| `karras` | Karras（默认，V4/V5 推荐） |
+| `karras` | Karras（默认，V4.5/V5 推荐） |
 | `exponential` | Exponential |
 | `polyexponential` | Polyexponential |
-| `native` | Native（仅 V3 模型，插件自动切换） |
+| `native` | Native |
 
 ### 角色外观与画风
 
@@ -122,7 +136,7 @@ data/image_generator_plugin-neo/
 ### 画图
 
 ```text
-/画图 [画幅] <提示词> [|| 负面提示词] [--scale X] [--rescale X]
+/画图 [画幅] <提示词> [|| 负面提示词] [--model 模型ID] [--steps N] [--scale X] [--rescale X] [--variety-plus true|false] [--render-text]
 ```
 
 也可以使用 `/生图` 或 `/nai_image`。
@@ -131,7 +145,8 @@ data/image_generator_plugin-neo/
 
 ```text
 /画图 竖图 1girl, blue hair, outdoor
-/画图 横图 fantasy city || text, watermark --scale 6 --rescale 0.2
+/画图 横图 fantasy city --model nai-diffusion-5-full --steps 24 --scale 6
+/画图 方图 girl holding a sign "欢迎" --model nai-diffusion-5-curated --render-text
 ```
 
 ### 改图
@@ -139,7 +154,7 @@ data/image_generator_plugin-neo/
 先引用一张图片，再发送：
 
 ```text
-/改图 <提示词> [强度]
+/改图 <提示词> [强度] [--model 模型ID] [--steps N] [--variety-plus true|false] [--render-text]
 ```
 
 也可以使用 `/修图` 或 `/nai_edit`。
@@ -151,12 +166,13 @@ data/image_generator_plugin-neo/
 先引用一张图片，再发送：
 
 ```text
-/参考图 <提示词> [--type 角色|风格|两者] [--fidelity X] [--strength X]
+/参考图 <提示词> [--model V4.5模型ID] [--type 角色|风格|两者] [--fidelity X] [--strength X]
 ```
 
 也可以使用 `/nai_ref`。
 
 精密参考与图生图不同：它不会直接重绘原图，而是把参考图中的人物特征或画风用于生成一张新图片。
+精密参考仅支持 V4.5。白名单含 V4.5 时命令会自动选择其中一个，也可以通过 `--model` 明确指定。
 
 ### Vibe 素材
 
@@ -217,7 +233,7 @@ Vibe 有两种使用方式：
 - `character&style`：同时参考人物与画风。
 - 参考强度和忠实度。
 
-该能力主要面向 NovelAI V4.5/V5 模型。
+该能力仅面向 NovelAI V4.5 模型。V5 暂不支持 Director Reference。
 
 ## PNG 元数据处理
 
@@ -263,7 +279,7 @@ WebUI 不要求额外密码，也不会把 NovelAI Token 返回给浏览器。
 
 ### 提示词应该使用中文还是英文
 
-NovelAI 更适合英文标签式提示词。AI 自动调用时也会按英文标签组织内容。
+取决于本次选择的模型。V4.5 使用英文标签式提示词；V5 可用英文 Tag 建立主体，再以简体中文、繁体中文、日文或英文自然语言描述复杂动作、关系和画面文字。
 
 ### 出现 429
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ImageGeneratorConfig
+from .models import GENERATION_MODELS, get_model_profile
 from .types import V4_MODELS, V5_MODELS
 
 OFFICIAL_GENERATE_PATH = "/ai/generate-image"
@@ -41,7 +42,6 @@ class EngineSettings:
         variety_plus: 是否启用 Variety+
         negative_prompt: 全局负面提示词
         always_use_coords: 多人物时是否启用坐标定位
-        max_characters: 单次生图允许的最大角色数
         max_vibes: 单用户最大 Vibe 叠加数
         img2img_default_strength: 图生图默认强度
         img2img_auto_downscale: 图生图是否自动缩放到免费像素范围
@@ -70,7 +70,6 @@ class EngineSettings:
     variety_plus: bool
     negative_prompt: str
     always_use_coords: bool
-    max_characters: int
 
     max_vibes: int
     img2img_default_strength: float
@@ -95,6 +94,26 @@ class EngineSettings:
         Returns:
             引擎运行时配置快照
         """
+        default_model = config.generation.model.strip()
+        get_model_profile(default_model)
+        available_models = tuple(
+            dict.fromkeys(
+                model.strip()
+                for model in config.generation.available_models
+                if model.strip()
+            )
+        )
+        invalid_models = [
+            model for model in available_models if model not in GENERATION_MODELS
+        ]
+        if invalid_models:
+            raise ValueError(
+                "available_models 包含不支持的模型："
+                + ", ".join(invalid_models)
+            )
+        if available_models and default_model not in available_models:
+            raise ValueError("available_models 必须包含 generation.model 默认模型")
+
         return cls(
             channel=config.api.channel,
             api_keys=tuple(config.api.api_keys),
@@ -102,7 +121,7 @@ class EngineSettings:
             api_base_url=config.api.api_base_url,
             proxy=config.api.proxy,
             cooldown=config.api.cooldown,
-            model=config.generation.model,
+            model=default_model,
             noise_schedule=config.generation.noise_schedule,
             resolution=config.generation.resolution,
             steps=config.generation.steps,
@@ -113,7 +132,6 @@ class EngineSettings:
             variety_plus=config.generation.variety_plus,
             negative_prompt=config.generation.negative_prompt,
             always_use_coords=config.generation.always_use_coords,
-            max_characters=config.advanced.max_characters,
             max_vibes=config.advanced.max_vibes,
             img2img_default_strength=config.advanced.img2img_default_strength,
             img2img_auto_downscale=config.generation.img2img_auto_downscale,
@@ -122,8 +140,23 @@ class EngineSettings:
             vibe_storage_dir=Path(config.advanced.vibe_storage_dir).absolute(),
             vibe_always_enabled=config.vibe.always_enabled,
             vibe_selectable_enabled=config.vibe.selectable_enabled,
-            available_models=tuple(config.generation.available_models),
+            available_models=available_models,
         )
+
+    @property
+    def allowed_models(self) -> tuple[str, ...]:
+        """Bot 可在单次请求中选择的严格模型白名单。"""
+
+        return self.available_models or (self.model,)
+
+    @property
+    def vibe_model(self) -> str | None:
+        """返回白名单中用于加载和编码 Vibe 的 V4.5 模型。"""
+
+        for model in self.allowed_models:
+            if get_model_profile(model).supports_vibe:
+                return model
+        return None
 
     @property
     def is_gateway(self) -> bool:

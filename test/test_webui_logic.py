@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from image_generator_plugin_neo.config import ImageGeneratorConfig
+from image_generator_plugin_neo.engine.engine import ImageEngine
+from image_generator_plugin_neo.engine.settings import EngineSettings
+from image_generator_plugin_neo.engine.types import GenerationSpec, ImageResult
 from image_generator_plugin_neo.webui import logic
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+class _PreviewEngine:
+    """记录 WebUI 预览请求的测试引擎。"""
+
+    def __init__(self, image_path: Path) -> None:
+        """初始化测试引擎与产图路径。"""
+
+        self.settings = EngineSettings.from_config(ImageGeneratorConfig())
+        self.image_path = image_path
+        self.spec: GenerationSpec | None = None
+
+    async def generate(self, spec: GenerationSpec) -> ImageResult:
+        """记录请求并返回预置图片。"""
+
+        self.spec = spec
+        return ImageResult.ok(str(self.image_path))
 
 
 def test_payload_never_exposes_api_keys() -> None:
@@ -32,6 +53,39 @@ def test_overrides_are_fully_validated() -> None:
     assert updated.generation.steps == 30
     assert updated.generation.scale == 6.0
     assert updated.generation.resolution == "832x1216"
+
+
+def test_payload_and_overrides_include_model_whitelist() -> None:
+    """验证 WebUI 可读取和保存严格模型白名单。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.available_models = [
+        "nai-diffusion-5-curated",
+        "nai-diffusion-4-5-full",
+    ]
+    payload = logic.config_to_payload(config, "config.toml")
+    assert payload["generation"]["availableModels"] == [
+        "nai-diffusion-5-curated",
+        "nai-diffusion-4-5-full",
+    ]
+
+    updated = logic.apply_overrides(
+        ImageGeneratorConfig(),
+        {
+            "generation": {
+                "model": "nai-diffusion-4-5-full",
+                "availableModels": [
+                    "nai-diffusion-4-5-full",
+                    "nai-diffusion-5-full",
+                ],
+            }
+        },
+    )
+    assert updated.generation.model == "nai-diffusion-4-5-full"
+    assert updated.generation.available_models == [
+        "nai-diffusion-4-5-full",
+        "nai-diffusion-5-full",
+    ]
 
 
 def test_overrides_ignore_unknown_fields() -> None:
@@ -70,6 +124,33 @@ def test_parse_resolution_falls_back_on_invalid_input() -> None:
 
     assert logic.parse_resolution("1216x832") == (1216, 832)
     assert logic.parse_resolution("bad") == logic.DEFAULT_PREVIEW_RESOLUTION
+
+
+async def test_generate_preview_passes_model_specific_options(
+    tmp_path: Path,
+) -> None:
+    """验证 WebUI 预览把调用级模型参数完整传给引擎。"""
+
+    image_path = tmp_path / "preview.png"
+    image_path.write_bytes(b"png")
+    engine = _PreviewEngine(image_path)
+
+    payload = await logic.generate_preview(
+        engine=cast(ImageEngine, engine),
+        prompt='girl holding a sign reading "Hello"',
+        model="nai-diffusion-5-full",
+        steps=24,
+        variety_plus=True,
+        render_text=True,
+    )
+
+    assert engine.spec is not None
+    assert engine.spec.model == "nai-diffusion-5-full"
+    assert engine.spec.steps == 24
+    assert engine.spec.variety_plus is True
+    assert engine.spec.render_text is True
+    assert payload["actualModel"] == "nai-diffusion-5-full"
+    assert payload["actualSteps"] == 24
 
 
 def test_gateway_document_covers_used_endpoints() -> None:

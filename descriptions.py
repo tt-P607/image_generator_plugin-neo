@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import ImageGeneratorConfig
+from .engine.models import get_model_profile
 from .engine.types import V3_MODELS, V4_MODELS, V5_MODELS
 
 
@@ -20,7 +21,7 @@ def detect_model_generation(model: str) -> str:
         model: 精确模型名，如 'nai-diffusion-5-curated'
 
     Returns:
-        'v5' | 'v4' | 'v3'
+        'v5' | 'v4' | 'v3' | 'unknown'
     """
     cleaned = model.strip()
     if cleaned in V5_MODELS:
@@ -29,7 +30,7 @@ def detect_model_generation(model: str) -> str:
         return "v4"
     if cleaned in V3_MODELS:
         return "v3"
-    return "v5"
+    return "unknown"
 
 
 def _model_header_block(config: ImageGeneratorConfig) -> str:
@@ -50,17 +51,13 @@ def _model_header_block(config: ImageGeneratorConfig) -> str:
 
 
 def _base_structure_block() -> str:
-    """构建通用的基础结构与冒号加权说明。"""
+    """构建不绑定模型代际的提示词结构说明。"""
     return (
-        "**1. 基础结构与分层排布**\n"
-        "提示词以半角逗号分隔的英文标签为主，越靠前对画面基调与构图的影响权重越高。\n"
-        "推荐九维分层顺序：\n"
-        "  1.品质画风 → 2.人数性别 → 3.角色身份 → 4.身体容貌 → "
-        "5.服装配饰 → 6.动作表情 → 7.环境背景 → 8.光影构图 → 9.渲染质感\n\n"
-        "**2. 权重语法（NovelAI 冒号语法）**\n"
-        "  - 提升权重：n::Tag::（推荐 n=1.1~1.4，如 1.3::silver hair::）\n"
-        "  - 降低权重：n::Tag::（推荐 n=0.6~0.9，如 0.8::blurry background::）\n"
-        "  - 注意：以数字结尾的词条末尾加空格或下划线（如 1.2::2000s _::），防止权重解析粘连"
+        "**1. 基础结构与九段顺位**\n"
+        "越靠前的内容越影响画面基调与构图。依次组织：画师/艺术媒介/品质 → 人数与性别 → "
+        "角色身份与作品 → 身体容貌 → 服装配饰 → 动作表情与互动 → 环境背景 → "
+        "光影/景深/视角 → 整体质感与复杂度。\n"
+        "具体语言、自然语言用法、Token 上限和权重区间必须遵守所选模型的专属规则。"
     )
 
 
@@ -71,6 +68,8 @@ def _character_naming_block() -> str:
         "  - 角色标准名：角色名 (作品名)，如 Castorice (honkai: star rail)\n"
         "  - 官方皮肤/形态：角色名_(皮肤名)_(作品名)，如 Hu_Tao_(Cherries_Snow-Laden)_(genshin_impact)\n"
         "  - 游戏 CG 原画风格：1.2::game_name (game cg)::\n"
+        "  - ASCII 转写：角色名中的长音/变音符号必须转为标准英文字母，"
+        "如 Gotō Hitori 写作 Gotoh Hitori (Bocchi the Rock!)\n"
         "  - 大小写不敏感，下划线与括号需按标准拼写"
     )
 
@@ -92,89 +91,127 @@ def _has_selectable_v4_model(config: ImageGeneratorConfig) -> bool:
     return detect_model_generation(config.generation.model) == "v4"
 
 
-def _model_specific_prompt_block(config: ImageGeneratorConfig) -> str:
-    """根据当前模型代际动态生成专属的提示词与文字生成语法。"""
-    generation = detect_model_generation(config.generation.model)
+def _model_specific_prompt_block(model: str) -> str:
+    """构建一个受支持模型的完整提示词与能力说明。"""
 
-    if generation == "v5":
-        if _has_selectable_v4_model(config):
-            refs_hint = (
-                "  - 参考图支持：\n"
-                "    V5 不使用 Vibe 风格参考与 Director 角色参考图；如本次需要参考图，"
-                "必须在 model 参数中显式指定 V4.5 模型后，再传 selected_vibes / selected_director_refs。"
-                "无论哪个模型，多人物坐标（characters 参数）均可用。"
-            )
-        else:
-            refs_hint = (
-                "  - 参考图支持：\n"
-                "    V5 模型依靠自身强大的提示词语义与原生 Tag 解析能力，"
-                "不使用且不支持 Vibe 风格参考与 Director 角色参考图"
-                "（无需填写 selected_vibes 与 selected_director_refs）。"
-            )
+    profile = get_model_profile(model)
+    edition = "Full" if profile.edition == "full" else "Curated"
+    if profile.is_v5:
         return (
-            "**4. V5 模型专属特性与文字生成**\n"
-            "  - 多语言画面文字绘制（V5 核心特性）：\n"
-            "    直接使用半角双引号 \"\" 或中文全角引号 “” 包裹想要呈现的文字，可结合自然语言描述载体与位置。\n"
-            "    * 对话框文字：green speech bubble that says: “你好，世界！”\n"
-            "    * 霓虹灯与招牌：neon street sign with text: \"NOVELAI V5\"\n"
-            "    * 横幅与标语：wooden storefront banner writing: “深夜食堂”\n"
-            "  - 自然语言融合与光影：\n"
-            "    V5 模型对自然语言长句与修饰词理解能力更强，可直接融入丰富的光影描绘（如 volumetric lighting, cinematic lighting, soft warm sunlight filtering through window）。\n"
-            "  - 推荐画风品质基调词：\n"
-            "    masterpiece, best quality, very aesthetic, official art\n"
-            f"{refs_hint}"
+            f"**{model}：NovelAI V5 {edition} 专属规则**\n"
+            "  - Prompt 上限 1471 Tokens。最佳写法是混合提示词：先用英文 Danbooru Tag "
+            "确定画风、人数、角色、外貌、服装、环境和镜头，再用完整英语自然语言句子描述"
+            "复杂动作、人物互动、肢体接触、视线与空间关系。V5 也理解日语及简繁中文描述，"
+            "但不要套用 V4.5 的纯 Tag、纯英文短词限制。\n"
+            "  - 知识库覆盖至 2026 年 7 月：新公开版权角色（如绝区零、鸣潮、星铁新角色）"
+            "可直接用标准英文名调用，无需回避。\n"
+            "  - 权重使用成对闭合的 `n::内容::`。主体与动作微调推荐 1.3~1.8，降权推荐"
+            " 0.6~0.8，不要滥用 >2.0；混合画风时单项用 0.1~0.8，全部风格权重之和约为 1.0。"
+            "数字结尾标签必须用空格、逗号或下划线隔离，避免权重解析错位。\n"
+            "  - Full 与 Curated 母体差异较大：风格词从一个版本迁移到另一个版本出现劣化时，"
+            "在 0.1~0.8 区间单独微调单项权重，不要暴力加权。\n"
+            "  - 画面文字上限约 750 Tokens：加入 text、speech bubble 等载体词，"
+            "用半角双引号直接包裹英文、日文或中文内容，例如 \"欢迎回家\"；日文也可用「」。"
+            "多角色对话要用英语自然语言明确谁说话、气泡颜色、文字颜色及对应台词。\n"
+            "  - 文字质量阶梯：英文与日文效果最好，简体/繁体中文良好可用，"
+            "其他语言无法在画面内渲染文字。\n"
+            "  - 原生 Alpha：透明背景用 transparent background；发光/粒子特效用 has alpha；"
+            "半透明雨伞、薄纱等材质用 alpha transparency。原生透明无需调用付费 RemoveBG。\n"
+            "  - 复杂度控制：low complexity 用于极简扁平，medium complexity 用于常规画面，"
+            "high complexity 是日常精细插画首选，ultra complexity 用于机械或高密大场景；"
+            "它控制单步细节预算，不能由增加 Steps 替代。\n"
+            "  - 其他控制词：meta: novel era 偏复古、meta: golden era 偏现代黄金期、"
+            "depthness 强化光影景深、attractive male 强化男性立体容貌。\n"
+            "  - 视觉小说资产：visual novel art 为整体画风，visual novel bg 为纯背景，"
+            "visual novel cg 为事件插画，visual novel sprite 为角色立绘，visual novel chibi 为 Q 版；"
+            "透明立绘组合 visual novel sprite 与 transparent background。\n"
+            "  - Meme 表情包：使用 xxx_(meme) 标签（如 padoru_(meme)），"
+            "配合双引号台词与 transparent background 直出。\n"
+            "  - 多格漫画：先写格式段（three-panel comic page, horizontal layout, "
+            "clear panel borders, correct reading order, speech bubbles, no additional characters），"
+            "再用 The first/second/third comic panel shows... 逐格写英语自然语言动作与引号台词。\n"
+            "  - 多角色使用 characters 独立描述并自由定位。x/y 是 0.0~1.0 连续归一化坐标，"
+            "可使用 0.17、0.43、0.86 等任意小数精确模拟官网自由拖动，不要吸附或取整到 5×5 格点。"
+            "版权角色硬上限 22（官方），"
+            "原创角色因一致性建议不超过 6；每个角色 prompt 可混合身份/外貌/服装 Tag 与英语自然语言动作。"
+            "坐标不可完全重叠，否则容易发生肢体黏连。V5 不要求 V4.5 的 5×5 网格，也不要强制套用"
+            " source#/target#/mutual# 互动标签，复杂互动直接写清施动者、受动者和空间关系。\n"
+            "  - 参数边界：Steps 固定使用管理员配置，AI Action 不得覆盖。Guidance、PGR 与 Variety+ "
+            "不增加生成消耗，但默认也不覆盖配置；仅在明确需要纠正提示词服从度、过曝或复杂动态构图时调整。"
+            "Guidance 通常为 4.5~6.5，PGR 通常为 0；复杂动作或漫画才考虑开启 Variety+。\n"
+            "  - 官网 UI 另有 Chunks 提示词收藏和 Enhance Max 放大，但它们不是 draw_image "
+            "的可调用参数；不要虚构 chunks 或 enhance_max 字段。\n"
+            "  - 不支持 Vibe 与 Director Reference；需要参考图时改选白名单中的 V4.5 模型。"
         )
-    elif generation == "v4":
-        return (
-            "**4. V4/V4.5 模型专属特性与文字生成**\n"
-            "  - 画面文字生成：\n"
-            "    必须使用 TEXT: 语法，并配合 speech bubble 等载体标签。\n"
-            "    * 示例：speech bubble, TEXT: Hello World\n"
-            "  - 标签密集堆叠：\n"
-            "    V4/V4.5 侧重标准的 Danbooru Tag 密集组合，对复杂从句容忍度较低，建议将修饰词拆解为独立英文标签。\n"
-            "  - 推荐画风品质基调词：\n"
-            "    masterpiece, best quality, ultra detailed, 1.2::ultra-detailed CG::\n"
-            "  - 参考图支持：\n"
-            "    支持 Vibe 风格参考图（selected_vibes）与 Director 角色精确参考图（selected_director_refs）。"
-        )
-    else:
-        return (
-            "**4. V3 模型专属特性**\n"
-            "  - 纯文本标签：仅支持单角色纯文本 prompt 与 negative_prompt，不支持结构化多角色坐标。\n"
-            "  - 推荐画风品质基调词：\n"
-            "    masterpiece, best quality, highly detailed"
-        )
+
+    return (
+        f"**{model}：NovelAI V4.5 {edition} 专属规则**\n"
+        "  - Prompt 上限 505 Tokens，以英文 Danbooru Tag、半角逗号和 ASCII 字符为主；"
+        "复杂修饰拆成独立标签，不使用 V5 的中日文自然语言工作流。\n"
+        "  - 知识库覆盖至 2025 年 6 月；较新的版权角色可能无法仅凭角色名稳定还原，"
+        "需要补充外貌、服装和标志性配饰 Tag。\n"
+        "  - 冒号权重 `n::Tag::` 推荐区间为 1.1~1.4，降权推荐 0.6~0.9。"
+        "双冒号必须成对闭合；数字结尾标签必须用空格、逗号或下划线隔离。\n"
+        "  - 画面文字必须在主提示词中加入 text、english text、speech bubble 等标签，"
+        "并在末尾空一行使用大写 `TEXT: 要显示的文字`；不要使用 V5 引号直出规则。\n"
+        "  - 支持 Vibe（selected_vibes）与 Director Reference（selected_director_refs）。\n"
+        "  - 多角色最多 6 个，使用 characters 的 x/y 坐标（对应官网 5×5 网格站位，"
+        "如 B3 ≈ x 0.5 / y 0.5）；互动在角色提示词中成对使用"
+        " source#/target#，对等互动使用 mutual#。\n"
+        "  - 参数边界：Steps 固定使用管理员配置，AI Action 不得覆盖。Guidance、PGR 与 Variety+ "
+        "默认不覆盖配置；只有明确需要时才调整。Guidance 通常为 4.5~6.0，PGR 通常为 0，"
+        "复杂构图才考虑开启 Variety+。\n"
+        "  - 不支持 V5 原生 Alpha、Control Tags、视觉小说控制词与 V5 漫画长文本工作流。"
+    )
+
+
+def _configured_generation_models(config: ImageGeneratorConfig) -> tuple[str, ...]:
+    """按默认模型优先顺序返回 Bot 可选择的模型。"""
+
+    configured = [config.generation.model, *config.generation.available_models]
+    return tuple(dict.fromkeys(model.strip() for model in configured if model.strip()))
+
+
+def _all_model_specific_blocks(config: ImageGeneratorConfig) -> str:
+    """构建配置白名单内全部模型的专属能力说明。"""
+
+    return "\n\n".join(
+        _model_specific_prompt_block(model)
+        for model in _configured_generation_models(config)
+    )
 
 
 def _multi_character_block(config: ImageGeneratorConfig) -> str:
     """构建多角色与互动说明。"""
-    generation = detect_model_generation(config.generation.model)
-    if generation == "v3":
-        return (
-            "**5. 人物控制**\n"
-            "当前 V3 模型仅支持单人物生成，请在 content_description 中直接书写角色与环境标签。"
-        )
-
     return (
-        "**5. 多角色与位置控制（5×5 网格坐标系，V5 与 V4/V4.5 均支持）**\n"
-        "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
-        "  - prompt：该角色英文专属标签（必填，包括发型、眼睛、服装、专属动作）\n"
+        "**多角色参数格式**\n"
+        "使用 characters 参数传入 JSON 数组，V4.5 官方上限 6 人，V5 版权角色官方上限 22 人；"
+        "V5 原创角色为保证一致性建议不超过 6 人。每项字段：\n"
+        "  - prompt：角色专属提示词（必填）。V4.5 使用英文 Tag；V5 推荐英文 Tag 与英语自然语言混合，"
+        "写明身份、外貌、服装、动作、互动对象及视线\n"
         "  - uc：角色专属负面词（可省略）\n"
-        "  - x：水平 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
-        "  - y：垂直 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
+        "  - x：水平归一化坐标 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
+        "  - y：垂直归一化坐标 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
+        "  - V5：x/y 在范围内是连续自由坐标，可使用任意小数模拟官网拖动，不得量化为 5×5 网格\n"
+        "  - V4.5：仍按官网 5×5 网格语义选择大致站位，再换算为对应 x/y\n"
         '示例：[{"prompt":"1girl, blonde hair, white dress","x":0.3,"y":0.5},'
         '{"prompt":"1girl, black hair, blue dress","x":0.7,"y":0.5}]\n\n'
-        "**6. 角色互动语法（Interaction Tags）**\n"
+        "**6. V4.5 角色互动语法（仅 V4.5）**\n"
         "  - 施动方：source#动作（如 source#hugging，填在发起角色的 prompt）\n"
         "  - 受动方：target#动作（如 target#hugging，填在接受角色的 prompt）\n"
         "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
         "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
+        "**V5 角色互动规则**\n"
+        "  - 不沿用上述 V4.5 专属互动标签限制；直接在各角色 prompt 中用英语自然语言写清"
+        "谁对谁做什么、肢体接触、朝向、视线与左右/前后关系\n"
+        "  - 使用 0.0~1.0 连续自由坐标定位，角色中心不可完全重叠；角色较多时让 content_description "
+        "明确整体构图、镜头和人数，避免模型自行增加人物\n\n"
         "**注意事项**\n"
         "  - 多角色时 content_description 只写环境/光影/构图与人数标签，角色细节放 characters\n"
         "  - ⚠️ 人数标签必须与 characters 精确对应：逐个统计各角色的性别后，把总人数写入 "
         "content_description（如两男一女必须写 2boys, 1girl；两女写 2girls）。"
         "漏写、多写或性别不匹配会导致画面人物数量错乱甚至崩坏\n"
-        "  - 单人物生图时不要传 characters，留空即可"
+        "  - 角色数量必须遵守实际所选模型的官方上限；单人物生图时不要传 characters，留空即可"
     )
 
 
@@ -189,49 +226,6 @@ def _composition_and_filename_block() -> str:
         "    出图成功后返回值包含实际文件名，后续 inpaint_image / director_tool 可通过此文件名引用。"
     )
 
-
-# 默认基础描述（展示 V5 架构），供静态引用
-BASE_DRAW_DESCRIPTION = "\n\n".join(
-    [
-        "【当前生效生图模型】\n  模型名称：`nai-diffusion-5-curated`（NovelAI V5 架构）\n  请严格按照该模型对应的专属语法与特性构建提示词。",
-        _base_structure_block(),
-        _character_naming_block(),
-        (
-            "**4. V5 模型专属特性与文字生成**\n"
-            "  - 多语言画面文字绘制（V5 核心特性）：\n"
-            "    直接使用半角双引号 \"\" 或中文全角引号 “” 包裹想要呈现的文字，可结合自然语言描述载体与位置。\n"
-            "    * 对话框文字：green speech bubble that says: “你好，世界！”\n"
-            "    * 霓虹灯与招牌：neon street sign with text: \"NOVELAI V5\"\n"
-            "    * 横幅与标语：wooden storefront banner writing: “深夜食堂”\n"
-            "  - 自然语言融合与光影：\n"
-            "    V5 模型对自然语言长句与修饰词理解能力更强，可直接融入丰富的光影描绘（如 volumetric lighting, cinematic lighting, soft warm sunlight filtering through window）。\n"
-            "  - 推荐画风品质基调词：\n"
-            "    masterpiece, best quality, very aesthetic, official art"
-        ),
-        (
-            "**5. 多角色与位置控制（5×5 网格坐标系）**\n"
-            "使用 characters 参数传入 JSON 数组，最多 6 个角色，每项字段：\n"
-            "  - prompt：该角色英文专属标签（必填，包括发型、眼睛、服装、专属动作）\n"
-            "  - uc：角色专属负面词（可省略）\n"
-            "  - x：水平 0.0~1.0（0=最左，1=最右，默认 0.5）\n"
-            "  - y：垂直 0.0~1.0（0=最上，1=最下，默认 0.5）\n"
-            '示例：[{"prompt":"1girl, blonde hair, white dress","x":0.3,"y":0.5},'
-            '{"prompt":"1girl, black hair, blue dress","x":0.7,"y":0.5}]\n\n'
-            "**6. 角色互动语法（Interaction Tags）**\n"
-            "  - 施动方：source#动作（如 source#hugging，填在发起角色的 prompt）\n"
-            "  - 受动方：target#动作（如 target#hugging，填在接受角色的 prompt）\n"
-            "  - 相互动作：mutual#动作（如 mutual#holding hands，双方 prompt 均填）\n"
-            "  - 规则：source/target 成对出现在不同角色上；不要在 content_description 重复互动动作\n\n"
-            "**注意事项**\n"
-            "  - 多角色时 content_description 只写环境/光影/构图与人数标签，角色细节放 characters\n"
-            "  - ⚠️ 人数标签必须与 characters 精确对应：逐个统计各角色的性别后，把总人数写入 "
-            "content_description（如两男一女必须写 2boys, 1girl；两女写 2girls）。"
-            "漏写、多写或性别不匹配会导致画面人物数量错乱甚至崩坏\n"
-            "  - 单人物生图时不要传 characters，留空即可"
-        ),
-        _composition_and_filename_block(),
-    ]
-)
 
 SKIP_STYLE_HINT = (
     "  ⚠️ 如果当前场景不适合此画风（如特殊形态、表情包、纯风景等），"
@@ -296,27 +290,20 @@ def _custom_block(config: ImageGeneratorConfig) -> str:
 
 def _model_list_block(config: ImageGeneratorConfig) -> str:
     """构建可选模型列表块。"""
-
-    models = config.generation.available_models
-    if not models:
-        return ""
-
+    models = _configured_generation_models(config)
     default = config.generation.model.strip()
-    gen_labels = {"v5": "V5", "v4": "V4/V4.5", "v3": "V3"}
     lines = [
         "【可选模型列表（通过 model 参数指定，不指定则使用默认模型）】"
-        "\n  共同能力：多人物坐标定位（characters）、冒号加权语法、三档画幅。"
+        "\n  只能从此白名单选择；每次调用必须按所选模型的专属规则构建其他参数。"
     ]
-    for m in models:
-        gen = detect_model_generation(m)
-        label = gen_labels.get(gen, "未知")
-        suffix = "（默认）" if m == default else ""
-        lines.append(f"  - `{m}` [{label}]{suffix}")
+    for model in models:
+        profile = get_model_profile(model)
+        suffix = "（默认）" if model == default else ""
+        lines.append(f"  - `{model}` [{profile.family} {profile.edition}]{suffix}")
 
     lines.append(
-        "  差异提示：V5 独有画面文字直接引号语法；"
-        "仅 V4/V4.5 支持画面文字 TEXT: 语法、Vibe 与精密参考。"
-        "需要参考图时切换到 V4.5 模型并传 selected_vibes / selected_director_refs。"
+        "  先根据任务选择模型：V5 适合多语言、复杂叙事、文字、透明素材与漫画；"
+        "V4.5 适合 Vibe、Director Reference 和稳定的纯 Tag 工作流。"
     )
     return "\n".join(lines)
 
@@ -374,7 +361,7 @@ def build_draw_description(config: ImageGeneratorConfig) -> str:
         _model_list_block(config),
         _base_structure_block(),
         _character_naming_block(),
-        _model_specific_prompt_block(config),
+        _all_model_specific_blocks(config),
         _multi_character_block(config),
         _composition_and_filename_block(),
         _style_block(config),
@@ -404,3 +391,6 @@ def build_negative_prompt_hint(config: ImageGeneratorConfig) -> str:
         f"场景专属额外排除词，英文逗号分隔。系统已内置：{preset}。"
         "此处只填本次图片特有的排除内容。"
     )
+
+
+BASE_DRAW_DESCRIPTION = build_draw_description(ImageGeneratorConfig())

@@ -99,6 +99,13 @@ _SCALE_FLAG_PATTERN = re.compile(
     r"--scale\s+(-?[\d.]+)|--rescale\s+(-?[\d.]+)",
     re.IGNORECASE,
 )
+_MODEL_FLAG_PATTERN = re.compile(r"--model\s+(\S+)", re.IGNORECASE)
+_STEPS_FLAG_PATTERN = re.compile(r"--steps\s+(\d+)", re.IGNORECASE)
+_VARIETY_FLAG_PATTERN = re.compile(
+    r"--variety-plus\s+(true|false)",
+    re.IGNORECASE,
+)
+_RENDER_TEXT_FLAG_PATTERN = re.compile(r"--render-text\b", re.IGNORECASE)
 _REFERENCE_FLAG_PATTERN = re.compile(
     r"--(?:type|参考类型)\s+(\S+)"
     r"|--fidelity\s+(-?[\d.]+)"
@@ -146,6 +153,17 @@ class ReferenceFlags:
     remainder: str
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationFlags:
+    """从命令文本中提取的模型与生成策略参数。"""
+
+    model: str | None
+    steps: int | None
+    variety_plus: bool | None
+    render_text: bool
+    remainder: str
+
+
 def _to_float(value: str | None) -> float | None:
     """把可选文本转成浮点数，失败返回 None。"""
 
@@ -187,6 +205,32 @@ def extract_scale_flags(text: str) -> ScaleFlags:
 
     remainder = _clean(_SCALE_FLAG_PATTERN.sub(_capture, text))
     return ScaleFlags(scale=scale, cfg_rescale=rescale, remainder=remainder)
+
+
+def extract_generation_flags(text: str) -> GenerationFlags:
+    """提取模型、步数、Variety+ 与画面文字开关。"""
+
+    model_match = _MODEL_FLAG_PATTERN.search(text)
+    steps_match = _STEPS_FLAG_PATTERN.search(text)
+    variety_match = _VARIETY_FLAG_PATTERN.search(text)
+    render_text = _RENDER_TEXT_FLAG_PATTERN.search(text) is not None
+
+    remainder = _MODEL_FLAG_PATTERN.sub("", text)
+    remainder = _STEPS_FLAG_PATTERN.sub("", remainder)
+    remainder = _VARIETY_FLAG_PATTERN.sub("", remainder)
+    remainder = _RENDER_TEXT_FLAG_PATTERN.sub("", remainder)
+
+    return GenerationFlags(
+        model=model_match.group(1) if model_match else None,
+        steps=int(steps_match.group(1)) if steps_match else None,
+        variety_plus=(
+            variety_match.group(1).lower() == "true"
+            if variety_match
+            else None
+        ),
+        render_text=render_text,
+        remainder=_clean(remainder),
+    )
 
 
 def extract_reference_flags(text: str) -> ReferenceFlags:

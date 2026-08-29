@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from .models import get_model_profile
 from .settings import EngineSettings
 from .types import (
     CharacterPrompt,
@@ -47,7 +48,12 @@ GATEWAY_UC_PRESETS: dict[int, str] = {
 }
 
 
-def merge_negative_prompts(base: str, extra: str | None) -> str:
+def merge_negative_prompts(
+    base: str,
+    extra: str | None,
+    *,
+    render_text: bool = False,
+) -> str:
     """合并全局负面词与本次额外负面词。
 
     保留全局词顺序，仅追加去重后的新词。
@@ -55,16 +61,19 @@ def merge_negative_prompts(base: str, extra: str | None) -> str:
     Args:
         base: 全局负面提示词
         extra: 本次额外负面提示词
+        render_text: 是否需要画面文字；为 True 时移除全局的 text 负面标签
 
     Returns:
         合并后的负面提示词
     """
+    base_tags = [tag.strip() for tag in base.split(",") if tag.strip()]
+    if render_text:
+        base_tags = [tag for tag in base_tags if tag.lower() != "text"]
     if not extra:
-        return base
-    if not base:
+        return ", ".join(base_tags)
+    if not base_tags:
         return extra
 
-    base_tags = [tag.strip() for tag in base.split(",") if tag.strip()]
     seen = {tag.lower() for tag in base_tags}
     extras = [
         tag.strip()
@@ -80,6 +89,7 @@ def _base_parameters(
     width: int,
     height: int,
     scale: float | None,
+    steps: int | None,
     seed: int,
     model: str | None = None,
 ) -> dict[str, Any]:
@@ -90,6 +100,7 @@ def _base_parameters(
         width: 目标宽度
         height: 目标高度
         scale: 引导比例覆盖
+        steps: 采样步数覆盖
         seed: 随机种子
         model: 实际使用的模型名，None 时沿用 settings.model
     """
@@ -100,7 +111,7 @@ def _base_parameters(
         "width": width,
         "height": height,
         "scale": scale if scale is not None else settings.scale,
-        "steps": settings.steps,
+        "steps": steps if steps is not None else settings.steps,
         "sampler": settings.sampler,
         "seed": seed,
         "n_samples": 1,
@@ -118,6 +129,7 @@ def _v4_common_parameters(
     prompt: str,
     negative_prompt: str,
     cfg_rescale: float | None,
+    variety_plus: bool | None,
     model: str | None = None,
 ) -> dict[str, Any]:
     """构造 V4 系列模型公共参数块。
@@ -127,12 +139,16 @@ def _v4_common_parameters(
         prompt: 正面提示词
         negative_prompt: 负面提示词
         cfg_rescale: CFG 缩放覆盖
+        variety_plus: Variety+ 覆盖
         model: 实际使用的模型名，None 时沿用 settings.model
     """
     effective = model or settings.model
     vibes_supported = EngineSettings.check_supports_vibes(effective)
 
     effective_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
+    effective_variety = (
+        variety_plus if variety_plus is not None else settings.variety_plus
+    )
     params: dict[str, Any] = {
         "params_version": 3,
         "cfg_rescale": effective_rescale,
@@ -146,7 +162,7 @@ def _v4_common_parameters(
         "normalize_reference_strength_multiple": False,
         "use_coords": False,
         "deliberate_euler_ancestral_bug": False,
-        "skip_cfg_above_sigma": VARIETY_PLUS_SIGMA if settings.variety_plus else None,
+        "skip_cfg_above_sigma": VARIETY_PLUS_SIGMA if effective_variety else None,
         "characterPrompts": [],
         "v4_prompt": {
             "caption": {"base_caption": prompt, "char_captions": []},
@@ -270,6 +286,7 @@ def build_official_generation(
     negative_prompt = merge_negative_prompts(
         settings.negative_prompt,
         spec.negative_prompt,
+        render_text=spec.render_text,
     )
     seed = random.randint(0, SEED_MAX)
     parameters = _base_parameters(
@@ -277,6 +294,7 @@ def build_official_generation(
         width=spec.width,
         height=spec.height,
         scale=spec.scale,
+        steps=spec.steps,
         seed=seed,
         model=effective_model,
     )
@@ -288,6 +306,7 @@ def build_official_generation(
                 prompt=spec.prompt,
                 negative_prompt=negative_prompt,
                 cfg_rescale=spec.cfg_rescale,
+                variety_plus=spec.variety_plus,
                 model=effective_model,
             )
         )
@@ -350,14 +369,19 @@ def build_official_inpaint(
     negative_prompt = merge_negative_prompts(
         settings.negative_prompt,
         spec.negative_prompt,
+        render_text=spec.render_text,
     )
+    effective_model = spec.model or settings.model
+    profile = get_model_profile(effective_model)
     seed = random.randint(0, SEED_MAX)
     parameters = _base_parameters(
         settings,
         width=spec.width,
         height=spec.height,
         scale=spec.scale,
+        steps=spec.steps,
         seed=seed,
+        model=effective_model,
     )
     parameters.update(
         {
@@ -373,29 +397,24 @@ def build_official_inpaint(
         }
     )
 
-    if settings.is_v4_model:
+    if EngineSettings.check_is_v4_or_v5(effective_model):
         parameters.update(
             _v4_common_parameters(
                 settings,
                 prompt=spec.prompt,
                 negative_prompt=negative_prompt,
                 cfg_rescale=spec.cfg_rescale,
+                variety_plus=spec.variety_plus,
+                model=effective_model,
             )
         )
         parameters["add_original_image"] = True
     else:
         parameters["negative_prompt"] = negative_prompt
 
-    model = settings.model
-    if not model.endswith("-inpainting"):
-        if model == "nai-diffusion-5-curated":
-            model = "nai-diffusion-5-full-inpainting"
-        else:
-            model = f"{model}-inpainting"
-
     return {
         "input": spec.prompt,
-        "model": model,
+        "model": profile.inpainting_model,
         "action": "infill",
         "parameters": parameters,
         "use_new_shared_trial": True,
@@ -482,6 +501,7 @@ def build_encode_vibe(
     settings: EngineSettings,
     image_b64: str,
     information_extracted: float,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """构造 Vibe 编码请求体。
 
@@ -492,6 +512,7 @@ def build_encode_vibe(
         settings: 引擎配置快照
         image_b64: 原始图片 base64
         information_extracted: 信息提取量
+        model: Vibe 向量所属模型，None 时使用默认模型
 
     Returns:
         encode-vibe 请求体
@@ -499,7 +520,7 @@ def build_encode_vibe(
     return {
         "image": image_b64,
         "information_extracted": information_extracted,
-        "model": settings.model,
+        "model": model or settings.model,
     }
 
 
@@ -527,7 +548,7 @@ def build_gateway_generation(
     vibes_ok = EngineSettings.check_supports_vibes(effective_model)
 
     params: dict[str, Any] = {
-        "steps": settings.steps,
+        "steps": spec.steps if spec.steps is not None else settings.steps,
         "scale": spec.scale if spec.scale is not None else settings.scale,
         "cfg_rescale": (
             spec.cfg_rescale if spec.cfg_rescale is not None else settings.cfg_rescale
@@ -537,11 +558,17 @@ def build_gateway_generation(
         "negative_prompt": merge_negative_prompts(
             settings.negative_prompt,
             spec.negative_prompt,
+            render_text=spec.render_text,
         ),
         "quality": True,
         "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
     }
-    if settings.variety_plus:
+    effective_variety = (
+        spec.variety_plus
+        if spec.variety_plus is not None
+        else settings.variety_plus
+    )
+    if effective_variety:
         params["variety_boost"] = True
 
     payload: dict[str, Any] = {
@@ -613,15 +640,16 @@ def build_gateway_inpaint(
     Returns:
         Gateway generations（inpainting）请求体
     """
-    return {
-        "model": settings.model,
+    effective_model = spec.model or settings.model
+    payload = {
+        "model": effective_model,
         "prompt": spec.prompt,
         "size": f"{spec.width}x{spec.height}",
         "image": spec.source_image,
         "mask": spec.mask,
         "strength": spec.strength,
         "params": {
-            "steps": settings.steps,
+            "steps": spec.steps if spec.steps is not None else settings.steps,
             "scale": spec.scale if spec.scale is not None else settings.scale,
             "cfg_rescale": (
                 spec.cfg_rescale
@@ -633,11 +661,20 @@ def build_gateway_inpaint(
             "negative_prompt": merge_negative_prompts(
                 settings.negative_prompt,
                 spec.negative_prompt,
+                render_text=spec.render_text,
             ),
             "quality": True,
             "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
         },
     }
+    effective_variety = (
+        spec.variety_plus
+        if spec.variety_plus is not None
+        else settings.variety_plus
+    )
+    if effective_variety:
+        payload["params"]["variety_boost"] = True
+    return payload
 
 
 def build_gateway_director(

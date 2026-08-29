@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .models import V5_MODELS as V5_MODELS
+
 DirectorRefType = Literal["character", "style", "character&style"]
 DirectorToolType = Literal[
     "declutter",
@@ -20,12 +22,6 @@ DirectorToolType = Literal[
 ]
 
 # 固定的 NovelAI 官方支持模型集合（绝对匹配，禁止模糊/子串匹配）
-V5_MODELS: frozenset[str] = frozenset({
-    "nai-diffusion-5-full",
-    "nai-diffusion-5-curated",
-    "nai-diffusion-5-full-inpainting",
-})
-
 V4_MODELS: frozenset[str] = frozenset({
     "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated",
@@ -87,8 +83,8 @@ class CharacterPrompt:
     Attributes:
         prompt: 该角色的正面标签
         negative_prompt: 该角色的负面标签
-        x: 水平坐标（0.0–1.0）
-        y: 垂直坐标（0.0–1.0）
+        x: 水平连续归一化坐标（0.0–1.0）
+        y: 垂直连续归一化坐标（0.0–1.0）
     """
 
     prompt: str
@@ -109,12 +105,15 @@ class GenerationSpec:
         height: 目标高度
         scale: 覆盖引导比例，None 表示沿用配置值
         cfg_rescale: 覆盖 cfg_rescale，None 表示沿用配置值
+        steps: 覆盖采样步数，None 表示沿用配置值
+        variety_plus: 覆盖 Variety+，None 表示沿用配置值
+        render_text: 是否需要生成画面文字，用于调整通用负面词
         source_image: 图生图原图 base64，非空即视为图生图
         strength: 图生图强度，None 表示沿用配置默认值
         model: 本次指定的模型名，None 表示沿用默认模型
         selected_vibe_names: LLM 自选的 Vibe 名称
         director_refs: 精密参考素材
-        characters: 多人物列表，仅 V4 系列模型支持
+        characters: 多人物列表，V4.5 与 V5 均支持
         from_command: 结果是否保存到命令图片目录
     """
 
@@ -125,6 +124,9 @@ class GenerationSpec:
     height: int = 1024
     scale: float | None = None
     cfg_rescale: float | None = None
+    steps: int | None = None
+    variety_plus: bool | None = None
+    render_text: bool = False
     source_image: str | None = None
     strength: float | None = None
     model: str | None = None
@@ -152,8 +154,12 @@ class InpaintSpec:
         width: 目标宽度
         height: 目标高度
         strength: 重绘强度（0.01–1.0）
+        model: 本次指定的生成模型，None 表示沿用默认模型
         scale: 覆盖引导比例
         cfg_rescale: 覆盖 cfg_rescale
+        steps: 覆盖采样步数
+        variety_plus: 覆盖 Variety+
+        render_text: 是否需要生成画面文字
         from_command: 结果是否保存到命令图片目录
     """
 
@@ -164,8 +170,12 @@ class InpaintSpec:
     width: int = 1024
     height: int = 1024
     strength: float = 0.7
+    model: str | None = None
     scale: float | None = None
     cfg_rescale: float | None = None
+    steps: int | None = None
+    variety_plus: bool | None = None
+    render_text: bool = False
     from_command: bool = False
 
 
