@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from image_generator_plugin_neo.config import ImageGeneratorConfig
+from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
 from image_generator_plugin_neo.plugin import ImageGeneratorPlugin
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -178,6 +178,33 @@ def test_config_discards_empty_vibe_placeholders() -> None:
     assert config.vibe.always == []
     assert len(config.vibe.selectable) == 1
     assert config.vibe.selectable[0].file == "valid.naiv4vibe"
+
+
+def test_config_preserves_prompt_presets_when_cleaning_file_lists() -> None:
+    """验证清理素材列表占位项时不会误删提示词预设。"""
+
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    raw["prompt"]["presets"] = [
+        {
+            "name": "自拍模式",
+            "trigger": "用户要求自拍时",
+            "content": "使用近景构图",
+        }
+    ]
+    raw["vibe"]["always"] = [
+        {"file": "", "enabled": True, "description": "", "ie": 1.0, "strength": 0.6}
+    ]
+
+    config = ImageGeneratorConfig.model_validate(raw)
+
+    assert config.prompt.presets == [
+        PromptPresetConfig(
+            name="自拍模式",
+            trigger="用户要求自拍时",
+            content="使用近景构图",
+        )
+    ]
+    assert config.vibe.always == []
 
 
 def test_config_discards_empty_director_reference_placeholders() -> None:

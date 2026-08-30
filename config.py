@@ -186,6 +186,9 @@ class ImageGeneratorConfig(BaseConfig):
 
             sanitized_section = dict(section_data)
             for sub_name, sub_field in section_model.model_fields.items():
+                item_model = _resolve_section_model(sub_field.annotation)
+                if item_model is None or "file" not in item_model.model_fields:
+                    continue
                 sub_items = sanitized_section.get(sub_name)
                 if not isinstance(sub_items, list):
                     continue
