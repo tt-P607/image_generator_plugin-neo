@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import dataclasses
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -18,6 +18,7 @@ import aiohttp
 from src.app.plugin_system.api.log_api import get_logger
 
 from ..config import ImageGeneratorConfig
+from ..media import enhance as enhance_ops
 from ..media import image_ops
 from . import assets as asset_lib
 from . import payload as payload_builder
@@ -26,7 +27,9 @@ from .http import ApiRequestError, NovelAIHttpClient, RateLimitedError
 from .queue import SerialTaskQueue
 from .settings import EngineSettings
 from .types import (
+    DirectorRefAsset,
     DirectorToolSpec,
+    EnhanceSpec,
     GenerationSpec,
     ImageResult,
     InpaintSpec,
@@ -40,6 +43,73 @@ PLUGIN_NAME = "image_generator_plugin-neo"
 
 DEFAULT_MANUAL_VIBE_IE = 1.0
 DEFAULT_MANUAL_VIBE_STRENGTH = 0.6
+MIN_IMAGE_DIMENSION = 64
+MAX_IMAGE_DIMENSION = 2048
+IMAGE_DIMENSION_ALIGNMENT = 64
+
+
+def _dimension_error(
+    model: str,
+    width: int,
+    height: int,
+    max_pixels: int,
+) -> str | None:
+    """校验标准生成画幅并返回字段化错误。"""
+
+    if not isinstance(width, int) or not isinstance(height, int):
+        return (
+            f"模型 {model!r} 的字段 width/height 必须是整数"
+            f"（当前为 width={width!r}, height={height!r}）"
+        )
+    if not (
+        MIN_IMAGE_DIMENSION <= width <= MAX_IMAGE_DIMENSION
+        and MIN_IMAGE_DIMENSION <= height <= MAX_IMAGE_DIMENSION
+    ):
+        return (
+            f"模型 {model!r} 的字段 width/height 必须在 "
+            f"{MIN_IMAGE_DIMENSION}~{MAX_IMAGE_DIMENSION} 之间"
+            f"（当前为 {width}x{height}）"
+        )
+    if width % IMAGE_DIMENSION_ALIGNMENT or height % IMAGE_DIMENSION_ALIGNMENT:
+        return (
+            f"模型 {model!r} 的字段 width/height 必须是 "
+            f"{IMAGE_DIMENSION_ALIGNMENT} 的倍数（当前为 {width}x{height}）"
+        )
+    pixels = width * height
+    if pixels > max_pixels:
+        return f"模型 {model!r} 的总像素不能超过 {max_pixels}（当前为 {pixels}）"
+    return None
+
+
+def _normalize_director_refs(
+    refs: tuple[DirectorRefAsset, ...],
+) -> tuple[DirectorRefAsset, ...]:
+    """校验并按 Q68 规则规范化 Director Reference。"""
+
+    normalized: list[DirectorRefAsset] = []
+    allowed_types = {"character", "style", "character&style"}
+    for index, reference in enumerate(refs):
+        if reference.ref_type not in allowed_types:
+            raise ValueError(
+                f"字段 director_refs[{index}].ref_type 不合法（当前为 {reference.ref_type!r}）"
+            )
+        for field, value in (
+            ("fidelity", reference.fidelity),
+            ("strength", reference.strength),
+            ("information_extracted", reference.information_extracted),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"字段 director_refs[{index}].{field} 必须在 0.0~1.0 之间"
+                    f"（当前为 {value!r}）"
+                )
+        normalized.append(
+            replace(
+                reference,
+                data=image_ops.fit_for_director_reference(reference.data),
+            )
+        )
+    return tuple(normalized)
 
 
 class ImageEngine:
@@ -171,6 +241,7 @@ class ImageEngine:
         effective_model = spec.model or self._settings.model
         try:
             profile = self._settings.model_profile(effective_model)
+            self._settings.resolve_sampling_parameters(effective_model)
         except ValueError as error:
             return ImageResult.failure(str(error))
 
@@ -180,23 +251,69 @@ class ImageEngine:
                 f"可用模型：{', '.join(self._settings.allowed_models)}"
             )
 
-        if spec.steps is not None and not 1 <= spec.steps <= 50:
-            return ImageResult.failure("steps 必须在 1~50 之间")
+        effective_steps = spec.steps if spec.steps is not None else self._settings.steps
+        if not 1 <= effective_steps <= profile.max_steps:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的采样步数必须在 1~{profile.max_steps} 之间（当前为 {effective_steps}）"
+            )
         if spec.scale is not None and not 1.0 <= spec.scale <= 10.0:
             return ImageResult.failure("guidance 必须在 1.0~10.0 之间")
         if spec.cfg_rescale is not None and not 0.0 <= spec.cfg_rescale <= 1.0:
             return ImageResult.failure("pgr 必须在 0.0~1.0 之间")
+        if spec.strength is not None and not 0.01 <= spec.strength <= 1.0:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 strength 不合法（当前为 {spec.strength!r}，要求 0.01~1.0）"
+            )
+        if spec.noise is not None and not 0.0 <= spec.noise <= 0.99:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 noise 不合法（当前为 {spec.noise!r}，要求 0.0~0.99）"
+            )
+        if spec.seed is not None and not 0 <= spec.seed <= payload_builder.SEED_MAX:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 seed 不合法（当前为 {spec.seed!r}，"
+                f"要求 0~{payload_builder.SEED_MAX}）"
+            )
+        if spec.upscaled_enhance and not profile.supports_max_enhance:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持字段 upscaled_enhance（当前为 True）"
+            )
+        if spec.variety_plus is True and not profile.supports_variety_plus:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持字段 variety_plus（当前为 True）"
+            )
+
+        dimension_error = _dimension_error(
+            effective_model,
+            spec.width,
+            spec.height,
+            profile.max_pixels,
+        )
+        if dimension_error is not None:
+            return ImageResult.failure(dimension_error)
 
         if spec.selected_vibe_names and not profile.supports_vibe:
             return ImageResult.failure(
-                f"模型 {effective_model!r} 不支持 Vibe，请选择 V4.5 模型"
+                f"模型 {effective_model!r} 不支持 Vibe，请选择支持 Vibe 的模型（如 V4.5）"
             )
         if spec.director_refs and not profile.supports_director_reference:
             return ImageResult.failure(
                 f"模型 {effective_model!r} 不支持 Director Reference，请选择 V4.5 模型"
             )
 
+        try:
+            if spec.source_image is not None:
+                image_ops.validate_image_data(spec.source_image, field="source_image")
+            normalized_refs = _normalize_director_refs(spec.director_refs)
+        except ValueError as error:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的请求素材无效：{error}"
+            )
+        if normalized_refs != spec.director_refs:
+            spec = replace(spec, director_refs=normalized_refs)
+
         if spec.characters:
+            if not profile.supports_characters:
+                return ImageResult.failure(f"模型 {effective_model!r} 不支持多角色设定")
             character_limit = profile.max_characters
             if len(spec.characters) > character_limit:
                 return ImageResult.failure(
@@ -206,6 +323,95 @@ class ImageEngine:
                 )
 
         return await self._submit(lambda: self._run_generate(spec))
+
+    async def generate_many(
+        self,
+        spec: GenerationSpec,
+        count: int,
+    ) -> tuple[ImageResult, ...]:
+        """以单图 wire 串行生成 1 到 4 张图片。"""
+
+        if not 1 <= count <= 4:
+            return (ImageResult.failure(f"count 必须在 1~4 之间（当前为 {count!r}）"),)
+        results: list[ImageResult] = []
+        for index in range(count):
+            seed = spec.seed + index if spec.seed is not None else None
+            result = await self.generate(replace(spec, seed=seed))
+            results.append(result)
+            if not result.success:
+                break
+        return tuple(results)
+
+    async def enhance(self, spec: EnhanceSpec) -> ImageResult:
+        """执行普通 Enhance 或仅 V5 支持的 Max Enhance。"""
+
+        effective_model = spec.model or self._settings.model
+        try:
+            profile = self._settings.model_profile(effective_model)
+            clean, width, height = image_ops.validate_image_data(
+                spec.source_image,
+                field="source_image",
+            )
+        except ValueError as error:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的 Enhance 请求无效：{error}"
+            )
+        if effective_model not in self._settings.allowed_models:
+            return ImageResult.failure(f"模型 {effective_model!r} 不在可选列表中")
+        if not profile.supports_enhance_prompt_add:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持字段 enhance_scale（当前为 {spec.scale!r}）"
+            )
+        if not 0.01 <= spec.strength <= 0.99:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 strength 不合法（当前为 {spec.strength!r}，要求 0.01~0.99）"
+            )
+        if not 0.0 <= spec.noise <= 0.99:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 noise 不合法（当前为 {spec.noise!r}，要求 0.0~0.99）"
+            )
+        if spec.seed is not None and not 0 <= spec.seed <= payload_builder.SEED_MAX:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 seed 不合法（当前为 {spec.seed!r}，"
+                f"要求 0~{payload_builder.SEED_MAX}）"
+            )
+        scales = enhance_ops.available_scales(
+            width,
+            height,
+            supports_max=profile.supports_max_enhance,
+        )
+        if spec.scale not in scales:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 enhance_scale 不合法（当前为 {spec.scale!r}，"
+                f"可用值：{', '.join(scales) or '无'}）"
+            )
+        target_width, target_height = enhance_ops.pipeline_dimensions(
+            width,
+            height,
+            spec.scale,
+        )
+        prompt = (
+            spec.prompt
+            if spec.scale == "Max" or not profile.supports_enhance_prompt_add
+            else enhance_ops.append_prompt_suffix(spec.prompt)
+        )
+        generation = GenerationSpec(
+            prompt=prompt,
+            user_id=spec.user_id,
+            negative_prompt=spec.negative_prompt,
+            width=target_width,
+            height=target_height,
+            seed=spec.seed,
+            source_image=clean,
+            strength=spec.strength,
+            noise=spec.noise,
+            upscaled_enhance=spec.scale == "Max",
+            model=spec.model,
+            from_command=spec.from_command,
+        )
+        return await self._submit(
+            lambda: self._run_generate(generation, prepare_img2img=False)
+        )
 
     async def inpaint(self, spec: InpaintSpec) -> ImageResult:
         """执行局部重绘。
@@ -218,7 +424,8 @@ class ImageEngine:
         """
         effective_model = spec.model or self._settings.model
         try:
-            self._settings.model_profile(effective_model)
+            profile = self._settings.model_profile(effective_model)
+            self._settings.resolve_sampling_parameters(effective_model)
         except ValueError as error:
             return ImageResult.failure(str(error))
         if effective_model not in self._settings.allowed_models:
@@ -226,12 +433,70 @@ class ImageEngine:
                 f"模型 {effective_model!r} 不在可选列表中，"
                 f"可用模型：{', '.join(self._settings.allowed_models)}"
             )
-        if spec.steps is not None and not 1 <= spec.steps <= 50:
-            return ImageResult.failure("steps 必须在 1~50 之间")
+        effective_steps = spec.steps if spec.steps is not None else self._settings.steps
+        if not 1 <= effective_steps <= profile.max_steps:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的采样步数必须在 1~{profile.max_steps} 之间（当前为 {effective_steps}）"
+            )
         if spec.scale is not None and not 1.0 <= spec.scale <= 10.0:
             return ImageResult.failure("guidance 必须在 1.0~10.0 之间")
         if spec.cfg_rescale is not None and not 0.0 <= spec.cfg_rescale <= 1.0:
             return ImageResult.failure("pgr 必须在 0.0~1.0 之间")
+        if not 0.01 <= spec.strength <= 1.0:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 strength 不合法（当前为 {spec.strength!r}，要求 0.01~1.0）"
+            )
+        if spec.noise is not None and not 0.0 <= spec.noise <= 0.99:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 noise 不合法（当前为 {spec.noise!r}，要求 0.0~0.99）"
+            )
+        if spec.seed is not None and not 0 <= spec.seed <= payload_builder.SEED_MAX:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的字段 seed 不合法（当前为 {spec.seed!r}，"
+                f"要求 0~{payload_builder.SEED_MAX}）"
+            )
+        if spec.variety_plus is True and not profile.supports_variety_plus:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持字段 variety_plus（当前为 True）"
+            )
+        dimension_error = _dimension_error(
+            effective_model,
+            spec.width,
+            spec.height,
+            profile.max_pixels,
+        )
+        if dimension_error is not None:
+            return ImageResult.failure(dimension_error)
+        if spec.director_refs and not profile.supports_director_reference:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 不支持字段 director_refs（当前为 {spec.director_refs!r}）"
+            )
+        try:
+            _, source_width, source_height = image_ops.validate_image_data(
+                spec.source_image,
+                field="source_image",
+            )
+            _, mask_width, mask_height = image_ops.validate_image_data(
+                spec.mask,
+                field="mask",
+            )
+            if (source_width, source_height) != (mask_width, mask_height):
+                raise ValueError(
+                    "字段 mask 尺寸必须与 source_image 一致"
+                    f"（source_image={source_width}x{source_height}, mask={mask_width}x{mask_height}）"
+                )
+            if (spec.width, spec.height) != (source_width, source_height):
+                raise ValueError(
+                    f"字段 width/height 必须与 source_image 一致（当前为 {spec.width}x{spec.height}，"
+                    f"source_image={source_width}x{source_height}）"
+                )
+            normalized_refs = _normalize_director_refs(spec.director_refs)
+        except ValueError as error:
+            return ImageResult.failure(
+                f"模型 {effective_model!r} 的请求素材无效：{error}"
+            )
+        if normalized_refs != spec.director_refs:
+            spec = replace(spec, director_refs=normalized_refs)
         return await self._submit(lambda: self._run_inpaint(spec))
 
     async def run_director_tool(self, spec: DirectorToolSpec) -> ImageResult:
@@ -243,6 +508,22 @@ class ImageEngine:
         Returns:
             执行结果
         """
+        try:
+            _, width, height = image_ops.validate_image_data(
+                spec.source_image,
+                field="source_image",
+            )
+        except ValueError as error:
+            return ImageResult.failure(f"Director Tool 字段 source_image 无效：{error}")
+        if (spec.width, spec.height) != (width, height):
+            return ImageResult.failure(
+                f"Director Tool 字段 width/height 与 source_image 不一致（当前为 {spec.width}x{spec.height}，"
+                f"source_image={width}x{height}）"
+            )
+        if spec.defry is not None and not 0 <= spec.defry <= 5:
+            return ImageResult.failure(
+                f"Director Tool 字段 defry 不合法（当前为 {spec.defry!r}，要求 0~5）"
+            )
         return await self._submit(lambda: self._run_director(spec))
 
     async def upscale(
@@ -251,7 +532,7 @@ class ImageEngine:
         *,
         from_command: bool = False,
     ) -> ImageResult:
-        """执行 4x 图片放大。
+        """执行固定 2× 图片放大。
 
         Args:
             image_b64: 源图 base64
@@ -260,6 +541,18 @@ class ImageEngine:
         Returns:
             执行结果
         """
+        try:
+            _, width, height = image_ops.validate_image_data(
+                image_b64,
+                field="image",
+            )
+        except ValueError as error:
+            return ImageResult.failure(f"固定 2× 放大的字段 image 无效：{error}")
+        if width * height > image_ops.FREE_TIER_MAX_PIXELS:
+            return ImageResult.failure(
+                "固定 2× 放大的字段 image 超过源图面积上限 "
+                f"{image_ops.FREE_TIER_MAX_PIXELS}（当前为 {width * height}）"
+            )
         return await self._submit(lambda: self._run_upscale(image_b64, from_command))
 
     async def get_user_info(self) -> tuple[bool, str]:
@@ -325,7 +618,12 @@ class ImageEngine:
 
     # ── 内部执行 ──
 
-    async def _run_generate(self, spec: GenerationSpec) -> ImageResult:
+    async def _run_generate(
+        self,
+        spec: GenerationSpec,
+        *,
+        prepare_img2img: bool = True,
+    ) -> ImageResult:
         """在队列内执行一次生图。"""
 
         await self._queue.wait_for_cooldown()
@@ -340,7 +638,7 @@ class ImageEngine:
         if self._settings.is_gateway:
             return await self._run_gateway_generate(spec, vibes, api_key, target_dir)
 
-        prepared = self._prepare_img2img(spec)
+        prepared = self._prepare_img2img(spec) if prepare_img2img else spec
         body = payload_builder.build_official_generation(
             self._settings,
             prepared,
@@ -429,9 +727,7 @@ class ImageEngine:
         """
 
         url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
-        body = payload_builder.build_gateway_generation(
-            self._settings, spec, vibes
-        )
+        body = payload_builder.build_gateway_generation(self._settings, spec, vibes)
 
         logger.info(f"[Gateway] POST {url} | {spec.width}x{spec.height}")
         response = await self._http.post_json(url, body, api_key)
@@ -450,12 +746,7 @@ class ImageEngine:
 
         if self._settings.is_gateway:
             url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
-            # 新版 OpenAI 兼容蒙版语义为“透明区域重绘”，与内部白=重绘约定相反，
-            # 发送前先反转 Alpha 通道。
-            body = payload_builder.build_gateway_inpaint(
-                self._settings,
-                dataclasses.replace(spec, mask=image_ops.invert_mask_alpha(spec.mask)),
-            )
+            body = payload_builder.build_gateway_inpaint(self._settings, spec)
             response = await self._http.post_json(url, body, api_key)
             return await self._save_gateway_response(response, api_key, target_dir)
 
@@ -468,20 +759,17 @@ class ImageEngine:
         return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
 
     async def _run_upscale(self, image_b64: str, from_command: bool) -> ImageResult:
-        """在队列内执行一次 4x 放大。"""
+        """在队列内执行一次固定 2× 放大。"""
 
         await self._queue.wait_for_cooldown()
         api_key = self._current_key()
         if not api_key:
             return ImageResult.failure("API Key 没配置，联系管理员看看")
 
-        clean = image_ops.strip_data_url_prefix(image_b64)
-        width, height = image_ops.read_image_size(clean)
-        if not width or not height:
-            return ImageResult.failure("无法读取图片尺寸")
+        clean, width, height = image_ops.validate_image_data(image_b64, field="image")
 
         target_dir = self._settings.output_dir(from_command)
-        logger.info(f"4x 放大 {width}x{height}")
+        logger.info(f"2× 放大 {width}x{height}")
 
         if self._settings.is_gateway:
             url = self._settings.gateway_url(payload_builder.GATEWAY_GENERATIONS_PATH)
@@ -538,9 +826,10 @@ class ImageEngine:
         if not self._settings.img2img_auto_downscale:
             return spec
 
-        width, height = image_ops.read_image_size(spec.source_image)
-        if not width or not height:
-            return spec
+        _, width, height = image_ops.validate_image_data(
+            spec.source_image,
+            field="source_image",
+        )
 
         scaled, new_width, new_height = image_ops.downscale_to_free_tier(
             spec.source_image
@@ -548,7 +837,12 @@ class ImageEngine:
         if (new_width, new_height) == (width, height):
             return spec
         logger.info(f"图生图原图自动缩放: {width}x{height} → {new_width}x{new_height}")
-        return replace_spec(spec, scaled, new_width, new_height)
+        return replace(
+            spec,
+            source_image=scaled,
+            width=new_width,
+            height=new_height,
+        )
 
     def _collect_vibes(self, spec: GenerationSpec) -> tuple[VibeAsset, ...]:
         """汇总本次生图需要注入的 Vibe。
@@ -604,9 +898,7 @@ class ImageEngine:
 
         b64_image = entry.get("b64_json")
         if isinstance(b64_image, str) and b64_image:
-            return ImageResult.ok(
-                str(storage.save_base64_image(b64_image, target_dir))
-            )
+            return ImageResult.ok(str(storage.save_base64_image(b64_image, target_dir)))
 
         image_url = entry.get("url")
         if isinstance(image_url, str) and image_url:
@@ -636,9 +928,10 @@ class ImageEngine:
             logger.error("无 API Key，无法编码 Vibe")
             return None
 
+        prepared_image = image_ops.fit_for_vibe_reference(image_b64)
         body = payload_builder.build_encode_vibe(
             self._settings,
-            image_b64,
+            prepared_image,
             information_extracted,
             model,
         )
@@ -782,38 +1075,3 @@ class ImageEngine:
             f"已添加【{resolved}】\n"
             f"{count}. IE:{asset.information_extracted}, Str:{asset.strength}"
         )
-
-
-def replace_spec(
-    spec: GenerationSpec,
-    source_image: str,
-    width: int,
-    height: int,
-) -> GenerationSpec:
-    """基于既有请求生成替换了原图与画幅的新请求。
-
-    Args:
-        spec: 原始请求描述
-        source_image: 新的原图 base64
-        width: 新宽度
-        height: 新高度
-
-    Returns:
-        新的请求描述
-    """
-    return GenerationSpec(
-        prompt=spec.prompt,
-        user_id=spec.user_id,
-        negative_prompt=spec.negative_prompt,
-        width=width,
-        height=height,
-        scale=spec.scale,
-        cfg_rescale=spec.cfg_rescale,
-        source_image=source_image,
-        strength=spec.strength,
-        model=spec.model,
-        selected_vibe_names=spec.selected_vibe_names,
-        director_refs=spec.director_refs,
-        characters=spec.characters,
-        from_command=spec.from_command,
-    )

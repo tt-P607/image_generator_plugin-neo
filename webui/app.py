@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -40,6 +40,20 @@ class GenerateRequest(BaseModel):
     variety_plus: bool | None = None
     render_text: bool = False
     selected_vibes: list[str] | None = Field(default=None, max_length=16)
+    seed: int | None = Field(default=None, ge=0, le=999_999_999)
+    count: int = Field(default=1, ge=1, le=4)
+
+
+class EnhanceRequest(BaseModel):
+    """Enhance 预览请求体。"""
+
+    image: str = Field(min_length=1)
+    prompt: str = Field(min_length=1, max_length=20000)
+    enhance_scale: Literal["1x", "1.5x", "2x", "Max"] = "1.5x"
+    strength: float = Field(default=0.5, ge=0.01, le=0.99)
+    noise: float = Field(default=0.0, ge=0.0, le=0.99)
+    model: str = Field(default="", max_length=128)
+    seed: int | None = Field(default=None, ge=0, le=999_999_999)
 
 
 class ConfigSaveRequest(BaseModel):
@@ -107,7 +121,7 @@ def create_app(
 
     @app.post("/api/generate")
     async def generate(request: GenerateRequest) -> dict[str, Any]:
-        """走生图队列出一张预览图。"""
+        """走生图队列串行生成一到四张预览图。"""
 
         result = await logic.generate_preview(
             engine=require_engine(),
@@ -121,11 +135,34 @@ def create_app(
             variety_plus=request.variety_plus,
             render_text=request.render_text,
             selected_vibes=request.selected_vibes,
+            seed=request.seed,
+            count=request.count,
         )
         if result["imageDataUrl"] is None:
             raise HTTPException(
                 status_code=502,
                 detail=result.get("error", "图片生成失败"),
+            )
+        return result
+
+    @app.post("/api/enhance")
+    async def enhance(request: EnhanceRequest) -> dict[str, Any]:
+        """对上传图片执行普通或 Max Enhance。"""
+
+        result = await logic.enhance_preview(
+            engine=require_engine(),
+            image=request.image,
+            prompt=request.prompt,
+            enhance_scale=request.enhance_scale,
+            strength=request.strength,
+            noise=request.noise,
+            model=request.model,
+            seed=request.seed,
+        )
+        if result["imageDataUrl"] is None:
+            raise HTTPException(
+                status_code=422,
+                detail=result.get("error", "图片增强失败"),
             )
         return result
 

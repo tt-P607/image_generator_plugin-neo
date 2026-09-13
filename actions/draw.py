@@ -93,10 +93,18 @@ class DrawAction(BaseImageAction):
         characters: Annotated[
             str,
             "多人物 JSON 数组字符串，每项 {prompt, uc?, x?, y?}，x/y 为 0~1 浮点坐标。"
-            "V4.5 最多 6 人并使用 source#/target#/mutual# 互动标签；V5 版权角色最多 22 人，"
+            "V4.5 最多 6 人并使用 source#/target#/mutual# 互动标签；V5 最多 32 人，"
             "原创角色建议不超过 6 人；V5 的 x/y 可使用范围内任意小数自由定位，不要按 5×5 网格取整，"
             "prompt 推荐混合英文 Tag 与英语自然语言。单人物时留空。",
         ] = "",
+        seed: Annotated[
+            int | None,
+            "可选随机种子，范围 0~999999999；留空时每张图使用随机种子。",
+        ] = None,
+        count: Annotated[
+            int,
+            "生成图片数量，范围 1~4。插件会逐张串行请求，每次只生成一张。",
+        ] = 1,
     ) -> tuple[bool, str]:
         """执行画图动作。"""
         if not content_description.strip():
@@ -106,6 +114,10 @@ class DrawAction(BaseImageAction):
         engine = self.engine
         if engine is None:
             return False, "图片生成服务不可用"
+        if seed is not None and not 0 <= seed <= 999_999_999:
+            return False, f"seed 必须在 0..999999999 范围内，收到 {seed}"
+        if not 1 <= count <= 4:
+            return False, f"count 必须在 1..4 范围内，收到 {count}"
 
         parsed_characters = _parse_characters(characters)
         if isinstance(parsed_characters, str):
@@ -133,10 +145,11 @@ class DrawAction(BaseImageAction):
                 _split_names(selected_director_refs)
             ),
             characters=parsed_characters,
+            seed=seed,
         )
 
-        async def _work() -> ImageResult:
-            return await engine.generate(spec)
+        async def _work() -> tuple[ImageResult, ...]:
+            return await engine.generate_many(spec, count)
 
         return await self.run_in_background(
             _work,

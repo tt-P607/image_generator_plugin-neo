@@ -11,7 +11,9 @@ from .director import (
 )
 from .draw import DrawAction
 from .edit import EditImageAction
+from .enhance import EnhanceAction
 from .inpaint import InpaintAction
+from .upscale import UpscaleAction
 
 __all__ = [
     "BaseImageAction",
@@ -20,8 +22,10 @@ __all__ = [
     "DeclutterAction",
     "DrawAction",
     "EditImageAction",
+    "EnhanceAction",
     "EmotionAction",
     "InpaintAction",
     "LineartAction",
     "SketchAction",
+    "UpscaleAction",
 ]

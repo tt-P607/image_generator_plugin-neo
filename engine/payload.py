@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from .models import ModelProfile
 from .settings import EngineSettings
 from .types import (
     CharacterPrompt,
@@ -105,25 +106,25 @@ def _base_parameters(
     """
     effective = model or settings.model
     profile = settings.model_profile(effective)
+    sampler, noise_schedule = settings.resolve_sampling_parameters(effective)
 
-    return {
+    params: dict[str, Any] = {
+        "params_version": profile.params_version,
         "width": width,
         "height": height,
         "scale": scale if scale is not None else settings.scale,
         "steps": steps if steps is not None else settings.steps,
-        "sampler": settings.sampler,
+        "sampler": sampler,
         "seed": seed,
         "n_samples": 1,
         "ucPreset": settings.uc_preset,
         "qualityToggle": True,
         "sm": False,
         "sm_dyn": False,
-        "noise_schedule": (
-            settings.noise_schedule
-            if profile.family in ("v4.5", "v5")
-            else "native"
-        ),
     }
+    if noise_schedule is not None:
+        params["noise_schedule"] = noise_schedule
+    return params
 
 
 def _v4_common_parameters(
@@ -135,7 +136,7 @@ def _v4_common_parameters(
     variety_plus: bool | None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """构造 V4 系列模型公共参数块。
+    """构造 V4/V5 系列模型公共参数块。
 
     Args:
         settings: 引擎配置快照
@@ -146,39 +147,44 @@ def _v4_common_parameters(
         model: 实际使用的模型名，None 时沿用 settings.model
     """
     effective = model or settings.model
-    vibes_supported = settings.model_profile(effective).supports_vibe
+    profile = settings.model_profile(effective)
+    vibes_supported = profile.supports_vibe
 
     effective_rescale = cfg_rescale if cfg_rescale is not None else settings.cfg_rescale
     effective_variety = (
         variety_plus if variety_plus is not None else settings.variety_plus
     )
     params: dict[str, Any] = {
-        "params_version": 3,
+        "params_version": profile.params_version,
         "cfg_rescale": effective_rescale,
         "autoSmea": False,
         "legacy": False,
         "legacy_v3_extend": False,
         "legacy_uc": False,
-        "controlnet_strength": 1,
         "dynamic_thresholding": False,
         "prefer_brownian": True,
-        "normalize_reference_strength_multiple": False,
-        "use_coords": False,
         "deliberate_euler_ancestral_bug": False,
-        "skip_cfg_above_sigma": VARIETY_PLUS_SIGMA if effective_variety else None,
-        "characterPrompts": [],
-        "v4_prompt": {
+        "negative_prompt": negative_prompt,
+    }
+    if profile.supports_variety_plus:
+        params["skip_cfg_above_sigma"] = VARIETY_PLUS_SIGMA if effective_variety else None
+
+    if profile.supports_characters:
+        params["characterPrompts"] = []
+        params["v4_prompt"] = {
             "caption": {"base_caption": prompt, "char_captions": []},
             "use_coords": False,
             "use_order": True,
-        },
-        "v4_negative_prompt": {
+        }
+        params["v4_negative_prompt"] = {
             "caption": {"base_caption": negative_prompt, "char_captions": []},
             "legacy_uc": False,
-        },
-        "negative_prompt": negative_prompt,
-    }
+        }
+        params["use_coords"] = False
+
     if vibes_supported:
+        params["controlnet_strength"] = 1
+        params["normalize_reference_strength_multiple"] = False
         params["reference_image_multiple"] = []
         params["reference_information_extracted_multiple"] = []
         params["reference_strength_multiple"] = []
@@ -189,6 +195,7 @@ def _apply_characters(
     parameters: dict[str, Any],
     characters: tuple[CharacterPrompt, ...],
     *,
+    profile: ModelProfile,
     use_coords: bool,
 ) -> None:
     """将多人物信息写入 official 参数块。"""
@@ -202,8 +209,8 @@ def _apply_characters(
 
     for character in characters:
         center = {
-            "x": max(0.0, min(1.0, character.x)),
-            "y": max(0.0, min(1.0, character.y)),
+            "x": profile.normalize_character_coordinate(character.x),
+            "y": profile.normalize_character_coordinate(character.y),
         }
         api_characters.append(
             {
@@ -250,7 +257,26 @@ def _apply_director_refs(
     parameters["director_reference_secondary_strength_values"] = [
         round(1.0 - ref.fidelity, 2) for ref in refs
     ]
-    parameters["director_reference_information_extracted"] = [1.0 for _ in refs]
+    parameters["director_reference_information_extracted"] = [
+        ref.information_extracted for ref in refs
+    ]
+
+
+def _gateway_director_refs(
+    refs: tuple[DirectorRefAsset, ...],
+) -> list[dict[str, Any]]:
+    """构造 Gateway 精密参考数组。"""
+
+    return [
+        {
+            "image": ref.data,
+            "type": ref.ref_type,
+            "strength": ref.strength,
+            "fidelity": ref.fidelity,
+            "information_extracted": ref.information_extracted,
+        }
+        for ref in refs
+    ]
 
 
 def _apply_vibes(parameters: dict[str, Any], vibes: tuple[VibeAsset, ...]) -> None:
@@ -291,7 +317,7 @@ def build_official_generation(
         spec.negative_prompt,
         render_text=spec.render_text,
     )
-    seed = random.randint(0, SEED_MAX)
+    seed = spec.seed if spec.seed is not None else random.randint(0, SEED_MAX)
     parameters = _base_parameters(
         settings,
         width=spec.width,
@@ -302,7 +328,7 @@ def build_official_generation(
         model=effective_model,
     )
 
-    if profile.family in ("v4.5", "v5"):
+    if profile.family in ("v4", "v4.5", "v5"):
         parameters.update(
             _v4_common_parameters(
                 settings,
@@ -314,11 +340,13 @@ def build_official_generation(
             )
         )
         parameters["add_original_image"] = False
-        _apply_characters(
-            parameters,
-            spec.characters,
-            use_coords=settings.always_use_coords,
-        )
+        if profile.supports_characters:
+            _apply_characters(
+                parameters,
+                spec.characters,
+                profile=profile,
+                use_coords=settings.always_use_coords,
+            )
         if refs_ok:
             _apply_director_refs(parameters, spec.director_refs)
         if vibes_ok and not spec.is_img2img and not spec.director_refs:
@@ -344,7 +372,7 @@ def build_official_generation(
             {
                 "image": spec.source_image,
                 "strength": strength,
-                "noise": 0.0,
+                "noise": spec.noise if spec.noise is not None else 0.0,
                 "extra_noise_seed": random.randint(0, SEED_MAX),
                 "img2img": {"color_correct": True, "strength": strength},
                 # infill/img2img 输出只含重绘区域，需叠回原图才能得到完整画面。
@@ -352,6 +380,8 @@ def build_official_generation(
                 "inpaintImg2ImgStrength": strength,
             }
         )
+        if spec.upscaled_enhance:
+            parameters["upscaled_enhance"] = True
 
     return payload
 
@@ -376,7 +406,7 @@ def build_official_inpaint(
     )
     effective_model = spec.model or settings.model
     profile = settings.model_profile(effective_model)
-    seed = random.randint(0, SEED_MAX)
+    seed = spec.seed if spec.seed is not None else random.randint(0, SEED_MAX)
     parameters = _base_parameters(
         settings,
         width=spec.width,
@@ -391,7 +421,7 @@ def build_official_inpaint(
             "image": spec.source_image,
             "mask": spec.mask,
             "strength": spec.strength,
-            "noise": 0,
+            "noise": spec.noise if spec.noise is not None else 0,
             "extra_noise_seed": seed,
             "img2img": {"color_correct": True, "strength": 1.0},
             "inpaintImg2ImgStrength": spec.strength,
@@ -400,7 +430,7 @@ def build_official_inpaint(
         }
     )
 
-    if profile.family in ("v4.5", "v5"):
+    if profile.family in ("v4", "v4.5", "v5"):
         parameters.update(
             _v4_common_parameters(
                 settings,
@@ -412,6 +442,8 @@ def build_official_inpaint(
             )
         )
         parameters["add_original_image"] = True
+        if profile.supports_director_reference:
+            _apply_director_refs(parameters, spec.director_refs)
     else:
         parameters["negative_prompt"] = negative_prompt
 
@@ -444,7 +476,7 @@ def build_official_director(
     if spec.prompt and spec.tool_type in PROMPT_TOOLS:
         payload["prompt"] = spec.prompt
     if spec.defry is not None and spec.tool_type in PROMPT_TOOLS:
-        payload["defry"] = max(0, min(5, spec.defry))
+        payload["defry"] = spec.defry
     return payload
 
 
@@ -453,21 +485,20 @@ def build_official_upscale(
     width: int,
     height: int,
 ) -> dict[str, Any]:
-    """构造 official 渠道 4x 放大请求体。
+    """构造 official 渠道固定 2× 放大请求体。
 
     Args:
         image_b64: 源图 base64
-        width: 源图宽度
-        height: 源图高度
+        width: 保留的源图宽度参数，端点不使用
+        height: 保留的源图高度参数，端点不使用
 
     Returns:
         official upscale 请求体
     """
     return {
         "image": image_b64,
-        "width": width,
-        "height": height,
-        "scale": 4,
+        "model": "nai-diffusion-5-curated",
+        "declared_blur_sigma": 0,
     }
 
 
@@ -477,14 +508,14 @@ def build_gateway_upscale(
     height: int,
     model: str,
 ) -> dict[str, Any]:
-    """构造 Gateway 渠道 4x 放大请求体。
+    """构造 Gateway 渠道固定 2× 放大请求体。
 
     统一走 ``/v1/images/generations`` 端点，通过 ``extra: "upscale"`` 触发放大。
 
     Args:
         image_b64: 源图 base64
-        width: 源图宽度
-        height: 源图高度
+        width: 保留的源图宽度参数，网关端点不使用
+        height: 保留的源图高度参数，网关端点不使用
         model: 标准模型名
 
     Returns:
@@ -494,8 +525,6 @@ def build_gateway_upscale(
         "model": model,
         "extra": "upscale",
         "image": image_b64,
-        "width": width,
-        "height": height,
         "response_format": "b64_json",
     }
 
@@ -548,6 +577,7 @@ def build_gateway_generation(
     """
     effective_model = spec.model or settings.model
     profile = settings.model_profile(effective_model)
+    sampler, noise_schedule = settings.resolve_sampling_parameters(effective_model)
     refs_ok = profile.supports_director_reference
     vibes_ok = profile.supports_vibe
 
@@ -557,8 +587,7 @@ def build_gateway_generation(
         "cfg_rescale": (
             spec.cfg_rescale if spec.cfg_rescale is not None else settings.cfg_rescale
         ),
-        "sampler": settings.sampler,
-        "noise_schedule": settings.noise_schedule,
+        "sampler": sampler,
         "negative_prompt": merge_negative_prompts(
             settings.negative_prompt,
             spec.negative_prompt,
@@ -567,12 +596,17 @@ def build_gateway_generation(
         "quality": True,
         "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
     }
+    if spec.seed is not None:
+        params["seed"] = spec.seed
+    if noise_schedule is not None:
+        params["noise_schedule"] = noise_schedule
+
     effective_variety = (
         spec.variety_plus
         if spec.variety_plus is not None
         else settings.variety_plus
     )
-    if effective_variety:
+    if profile.supports_variety_plus and effective_variety:
         params["variety_boost"] = True
 
     payload: dict[str, Any] = {
@@ -592,13 +626,21 @@ def build_gateway_generation(
         )
         payload["image"] = spec.source_image
         payload["strength"] = strength
+        payload["noise"] = spec.noise if spec.noise is not None else 0.0
+        if spec.seed is not None:
+            payload["extra_noise_seed"] = max(0, spec.seed - 1)
+        if spec.upscaled_enhance:
+            params["upscaled_enhance"] = True
 
-    if spec.characters:
+    if profile.supports_characters and spec.characters:
         params["characters"] = [
             {
                 "prompt": character.prompt,
-                "negative_prompt": character.negative_prompt,
-                "position": [character.x, character.y],
+                "uc": character.negative_prompt,
+                "center": {
+                    "x": profile.normalize_character_coordinate(character.x),
+                    "y": profile.normalize_character_coordinate(character.y),
+                },
                 "enabled": True,
             }
             for character in spec.characters
@@ -606,16 +648,7 @@ def build_gateway_generation(
         params["use_coords"] = bool(settings.always_use_coords)
 
     if refs_ok and spec.director_refs:
-        params["character_references"] = [
-            {
-                "image": ref.data,
-                "type": ref.ref_type,
-                "strength": ref.strength,
-                "fidelity": ref.fidelity,
-                "information_extracted": 1.0,
-            }
-            for ref in spec.director_refs
-        ]
+        params["character_references"] = _gateway_director_refs(spec.director_refs)
 
     if vibes_ok and vibes:
         params["reference_image_multiple"] = [vibe.data for vibe in vibes]
@@ -634,8 +667,8 @@ def build_gateway_inpaint(
     """构造 Gateway 渠道局部重绘请求体。
 
     新版 OpenAI 兼容端点在文生图基础上顶层提供 ``image`` + ``mask`` 即走局部重绘；
-    NovelAI 专属采样参数统一收入 ``params``。蒙版需符合 OpenAI 语义
-    （透明区域重绘、不透明区域保留），由调用方（引擎）预先完成转换。
+    NovelAI 专属采样参数统一收入 ``params``。内部蒙版使用 NovelAI 的
+    黑白语义（白色区域重绘），网关会按亮度通道规范化。
 
     Args:
         settings: 引擎配置快照
@@ -645,39 +678,51 @@ def build_gateway_inpaint(
         Gateway generations（inpainting）请求体
     """
     effective_model = spec.model or settings.model
-    payload = {
-        "model": effective_model,
-        "prompt": spec.prompt,
-        "size": f"{spec.width}x{spec.height}",
-        "image": spec.source_image,
-        "mask": spec.mask,
-        "strength": spec.strength,
-        "params": {
-            "steps": spec.steps if spec.steps is not None else settings.steps,
-            "scale": spec.scale if spec.scale is not None else settings.scale,
-            "cfg_rescale": (
-                spec.cfg_rescale
-                if spec.cfg_rescale is not None
-                else settings.cfg_rescale
-            ),
-            "sampler": settings.sampler,
-            "noise_schedule": settings.noise_schedule,
-            "negative_prompt": merge_negative_prompts(
-                settings.negative_prompt,
-                spec.negative_prompt,
-                render_text=spec.render_text,
-            ),
-            "quality": True,
-            "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
-        },
+    profile = settings.model_profile(effective_model)
+    sampler, noise_schedule = settings.resolve_sampling_parameters(effective_model)
+    params: dict[str, Any] = {
+        "steps": spec.steps if spec.steps is not None else settings.steps,
+        "scale": spec.scale if spec.scale is not None else settings.scale,
+        "cfg_rescale": (
+            spec.cfg_rescale
+            if spec.cfg_rescale is not None
+            else settings.cfg_rescale
+        ),
+        "sampler": sampler,
+        "negative_prompt": merge_negative_prompts(
+            settings.negative_prompt,
+            spec.negative_prompt,
+            render_text=spec.render_text,
+        ),
+        "quality": True,
+        "uc_preset": GATEWAY_UC_PRESETS[settings.uc_preset],
     }
+    if spec.seed is not None:
+        params["seed"] = spec.seed
+    if noise_schedule is not None:
+        params["noise_schedule"] = noise_schedule
+
     effective_variety = (
         spec.variety_plus
         if spec.variety_plus is not None
         else settings.variety_plus
     )
-    if effective_variety:
-        payload["params"]["variety_boost"] = True
+    if profile.supports_variety_plus and effective_variety:
+        params["variety_boost"] = True
+
+    payload = {
+        "model": effective_model,
+        "prompt": spec.prompt,
+        "n": 1,
+        "size": f"{spec.width}x{spec.height}",
+        "image": spec.source_image,
+        "mask": spec.mask,
+        "strength": spec.strength,
+        "noise": spec.noise if spec.noise is not None else 0,
+        "params": params,
+    }
+    if profile.supports_director_reference and spec.director_refs:
+        params["character_references"] = _gateway_director_refs(spec.director_refs)
     return payload
 
 
@@ -712,5 +757,5 @@ def build_gateway_director(
     if spec.prompt and spec.tool_type in PROMPT_TOOLS:
         payload["prompt"] = spec.prompt
     if spec.defry is not None and spec.tool_type in PROMPT_TOOLS:
-        payload["defry"] = max(0, min(5, spec.defry))
+        payload["defry"] = spec.defry
     return payload

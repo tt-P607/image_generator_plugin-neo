@@ -23,12 +23,18 @@ class _PreviewEngine:
         self.settings = EngineSettings.from_config(ImageGeneratorConfig())
         self.image_path = image_path
         self.spec: GenerationSpec | None = None
+        self.count: int | None = None
 
-    async def generate(self, spec: GenerationSpec) -> ImageResult:
-        """记录请求并返回预置图片。"""
+    async def generate_many(
+        self,
+        spec: GenerationSpec,
+        count: int,
+    ) -> tuple[ImageResult, ...]:
+        """记录批量请求并返回预置图片。"""
 
         self.spec = spec
-        return ImageResult.ok(str(self.image_path))
+        self.count = count
+        return tuple(ImageResult.ok(str(self.image_path)) for _ in range(count))
 
 
 def test_payload_never_exposes_api_keys() -> None:
@@ -88,6 +94,26 @@ def test_payload_and_overrides_include_model_whitelist() -> None:
     ]
 
 
+def test_payload_exposes_central_model_capabilities() -> None:
+    """验证前端 sampler/schedule 与 Enhance 控件只依赖后端能力 DTO。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.available_models = [
+        "nai-diffusion-5-curated",
+        "nai-diffusion-4-5-full",
+    ]
+    capabilities = logic.config_to_payload(config, "config.toml")["generation"][
+        "modelCapabilities"
+    ]
+    v5 = capabilities["nai-diffusion-5-curated"]
+    v45 = capabilities["nai-diffusion-4-5-full"]
+    assert v5["fixedNoiseSchedule"] == "karras"
+    assert v5["supportsMaxEnhance"] is True
+    assert v45["noiseSchedulesBySampler"]["k_dpm_2_ancestral"] == []
+    assert v45["supportsDirectorReference"] is True
+    assert v45["supportsMaxEnhance"] is False
+
+
 def test_overrides_ignore_unknown_fields() -> None:
     """验证白名单之外的字段不会被写入配置。"""
 
@@ -142,6 +168,8 @@ async def test_generate_preview_passes_model_specific_options(
         steps=24,
         variety_plus=True,
         render_text=True,
+        seed=0,
+        count=2,
     )
 
     assert engine.spec is not None
@@ -149,6 +177,9 @@ async def test_generate_preview_passes_model_specific_options(
     assert engine.spec.steps == 24
     assert engine.spec.variety_plus is True
     assert engine.spec.render_text is True
+    assert engine.spec.seed == 0
+    assert engine.count == 2
+    assert len(payload["imageDataUrls"]) == 2
     assert payload["actualModel"] == "nai-diffusion-5-full"
     assert payload["actualSteps"] == 24
 

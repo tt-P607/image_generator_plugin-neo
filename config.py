@@ -236,7 +236,7 @@ class ImageGeneratorConfig(BaseConfig):
         ]
         if invalid_models:
             raise ValueError(
-                "仅支持 V4.5/V5 生图模型（第三方中转的自定义模型名需含 4.5/5 等版本关键词，"
+                "仅支持受能力档案认可的官方生图模型（V3/V4/V4.5/V5；第三方中转的自定义模型名需含版本关键词，"
                 "或配置 model_aliases）："
                 + ", ".join(dict.fromkeys(invalid_models))
             )
@@ -292,6 +292,18 @@ class ImageGeneratorConfig(BaseConfig):
             default=True,
             description="是否启用图生图 Action（edit_image：整图重绘，无需遮罩）",
         )
+        enhance_action_enabled: bool = Field(
+            default=False,
+            description="是否启用图片 Enhance Action（普通倍率与 V5 Max）",
+        )
+        upscale_action_enabled: bool = Field(
+            default=False,
+            description="是否启用固定 2× 放大 Action（upscale_image）",
+        )
+        upscale_command_enabled: bool = Field(
+            default=False,
+            description="是否启用固定 2× 放大命令（/nai_upscale）",
+        )
         director_declutter_enabled: bool = Field(
             default=True,
             description="是否启用导演工具-去杂物（declutter：清理多余元素、遮挡物和文字）",
@@ -331,12 +343,11 @@ class ImageGeneratorConfig(BaseConfig):
                 "    响应格式：ZIP/PNG 二进制，插件自动解压保存。\n"
                 "    示例 base_url：https://image.novelai.net/ai/generate-image\n\n"
                 "  gateway\n"
-                "    使用 OpenAI Chat Completions 兼容协议（novelai-gateway 中转服务）。\n"
-                "    base_url 填写 gateway 服务根地址，插件自动拼接 /v1/chat/completions。\n"
+                "    使用 OpenAI Images 兼容协议（novelai-gateway 中转服务）。\n"
+                "    base_url 填写 gateway 服务根地址，插件请求 /v1/images/generations。\n"
                 "    支持含 /v1 后缀的完整路径，插件会自动规范化。\n"
-                "    支持：正面/负面提示词、多人物坐标、scale/cfg_rescale/画幅/采样器等参数。\n"
-                "    不支持：Vibe Transfer、Director Reference、图生图（切换后自动跳过，不报错）。\n"
-                "    响应格式：Markdown 图片链接，插件自动下载保存。\n"
+                "    支持：文生图、图生图、局部重绘、多人物、Vibe 和 Director 工具。\n"
+                "    响应格式：OpenAI Images JSON，插件读取 b64_json 保存图片。\n"
                 "    示例 base_url：http://127.0.0.1:31555 或 https://your-gateway.example.com/v1"
             ),
         )
@@ -411,8 +422,13 @@ class ImageGeneratorConfig(BaseConfig):
         noise_schedule: Literal["karras", "exponential", "polyexponential", "native"] = Field(
             default="karras",
             description=(
-                "噪声调度。可选：karras（默认，V4.5/V5 推荐）、exponential、"
-                "polyexponential、native。"
+                "噪声调度。可选：karras（默认，V4/V4.5 推荐）、exponential、"
+                "polyexponential、native。\n"
+                "V3/V4/V4.5 按模型和采样器能力矩阵校验 noise_schedule；"
+                "k_dpm_2_ancestral 不发送该字段。V3 的 ddim 不发送该字段；"
+                "V4/V4.5 的旧 ddim 配置会迁移为 k_euler_ancestral 且不发送该字段。"
+                "V5 不开放调度选择，但最终请求固定发送 noise_schedule=\"karras\"；"
+                "配置中的旧偏好会保留，切回旧模型时继续按矩阵校验。"
             ),
         )
         resolution: Literal["1024x1024", "1216x832", "832x1216"] = Field(
@@ -447,6 +463,8 @@ class ImageGeneratorConfig(BaseConfig):
                 "采样器。可选：k_euler、k_euler_ancestral（默认，推荐）、"
                 "k_dpm_2、k_dpm_2_ancestral、k_dpmpp_2m、k_dpmpp_2m_sde、"
                 "k_dpmpp_2s_ancestral、k_dpmpp_sde、ddim。"
+                "k_dpm_2_ancestral 合法但没有可选噪声调度；V4/V4.5/V5 的旧 ddim "
+                "配置会迁移为 k_euler_ancestral。"
             ),
         )
         prompt_guidance_rescale: float = Field(
@@ -547,7 +565,7 @@ class ImageGeneratorConfig(BaseConfig):
                 "自动使用 LANCZOS 算法等比缩放到不超过 1024×1024 的最大合法尺寸（对齐到 64px），"
                 "使 Opus 用户免费生成。\n"
                 "关闭：使用原图尺寸发送，超过 1M 像素时消耗 Anlas。\n"
-                "注意：Gateway 渠道的 /v1/images/img2img 端点自带自动缩放机制，"
+                "注意：Gateway 渠道统一使用 /v1/images/generations 端点，"
                 "此配置项仅影响 official 渠道。"
             ),
         )

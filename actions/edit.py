@@ -17,8 +17,6 @@ from .base import BaseImageAction
 
 logger = get_logger("image_generator_plugin.edit_action")
 
-FALLBACK_IMAGE_SIZE = (1024, 1024)
-
 
 class EditImageAction(BaseImageAction):
     """AI 图生图动作 — 基于已有图片整图重绘。"""
@@ -121,9 +119,15 @@ class EditImageAction(BaseImageAction):
             await self.notify(hint)
             return False, hint
 
-        width, height = image_ops.read_image_size(image_b64)
-        if not width or not height:
-            width, height = FALLBACK_IMAGE_SIZE
+        try:
+            clean_image, width, height = image_ops.validate_image_data(
+                image_b64,
+                field="source_image",
+            )
+        except ValueError as error:
+            return False, f"源图片无效：{error}"
+        if not 0.01 <= strength <= 1.0:
+            return False, f"strength 必须在 0.01~1.0 之间（当前为 {strength!r}）"
 
         logger.info(
             f"图生图 - 提示词: {content_description}"
@@ -141,8 +145,8 @@ class EditImageAction(BaseImageAction):
             cfg_rescale=pgr,
             variety_plus=variety_plus,
             render_text=render_text,
-            source_image=image_ops.strip_data_url_prefix(image_b64),
-            strength=max(0.01, min(1.0, strength)),
+            source_image=clean_image,
+            strength=strength,
         )
 
         async def _work() -> ImageResult:

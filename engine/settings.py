@@ -91,7 +91,7 @@ class EngineSettings:
     cooldown: int
 
     model: str
-    noise_schedule: str
+    noise_schedule: str | None
     resolution: str
     steps: int
     scale: float
@@ -150,7 +150,7 @@ class EngineSettings:
         if available_models and default_model not in available_models:
             raise ValueError("available_models 必须包含 generation.model 默认模型")
 
-        return cls(
+        settings = cls(
             channel=config.api.channel,
             api_keys=tuple(config.api.api_keys),
             base_url=config.api.base_url,
@@ -179,6 +179,9 @@ class EngineSettings:
             available_models=available_models,
             model_aliases=dict(config.generation.model_aliases),
         )
+        for model in settings.allowed_models:
+            settings.resolve_sampling_parameters(model)
+        return settings
 
     @property
     def allowed_models(self) -> tuple[str, ...]:
@@ -212,6 +215,56 @@ class EngineSettings:
 
         return resolve_model_profile(model, self.model_aliases)
 
+    def resolve_sampling_parameters(
+        self,
+        model: str | None = None,
+    ) -> tuple[str, str | None]:
+        """按模型能力解析最终采样器与噪声调度。
+
+        V5 的噪声调度不可选但 wire 固定为 ``karras``。V4、V4.5、V5
+        遇到官网不使用的 ``ddim`` 时改用档案默认采样器；V4/V4.5 的
+        调度器省略判断仍以改写前的 ``ddim`` 为准。
+
+        Args:
+            model: 实际生图模型，None 时使用默认模型
+
+        Returns:
+            最终发送的采样器与噪声调度；不发送调度时后者为 None
+
+        Raises:
+            ValueError: 采样器或采样器与噪声调度组合不受支持
+        """
+        effective_model = model or self.model
+        profile = self.model_profile(effective_model)
+        sampler = self.sampler
+        if not profile.supports_sampler(sampler):
+            raise ValueError(
+                f"模型 {effective_model!r} 不支持采样器 {sampler!r}"
+            )
+
+        original_sampler = sampler
+        if sampler == "ddim" and profile.family in ("v4", "v4.5", "v5"):
+            sampler = profile.default_sampler
+
+        if profile.is_v5:
+            return sampler, "karras"
+
+        if original_sampler == "ddim":
+            return sampler, None
+
+        allowed_schedules = profile.allowed_noise_schedules(original_sampler)
+        if not allowed_schedules:
+            return sampler, None
+
+        configured_schedule = self.noise_schedule or profile.default_noise_schedule
+        if configured_schedule not in allowed_schedules:
+            supported = ", ".join(sorted(allowed_schedules))
+            raise ValueError(
+                f"模型 {effective_model!r} 的采样器 {sampler!r} 不支持噪声调度 "
+                f"{configured_schedule!r}，可用值：{supported}"
+            )
+        return sampler, configured_schedule
+
     @property
     def vibe_model(self) -> str | None:
         """返回白名单中用于加载和编码 Vibe 的 V4.5 模型。"""
@@ -229,9 +282,9 @@ class EngineSettings:
 
     @property
     def is_v4_model(self) -> bool:
-        """当前模型是否属于 NovelAI V4/V5 系列（支持结构化 prompt、坐标及多人物）。"""
+        """当前模型是否属于 NovelAI V4/V4.5/V5 系列（支持结构化 prompt、坐标及多人物）。"""
 
-        return self.model_profile(self.model).family in ("v4.5", "v5")
+        return self.model_profile(self.model).family in ("v4", "v4.5", "v5")
 
     @property
     def is_v5_model(self) -> bool:
@@ -294,7 +347,7 @@ class EngineSettings:
 
     @property
     def official_upscale_url(self) -> str:
-        """official 渠道 4x 放大端点。"""
+        """official 渠道固定 2× 放大端点。"""
 
         return f"{self.api_base_url.rstrip('/')}{OFFICIAL_UPSCALE_PATH}"
 

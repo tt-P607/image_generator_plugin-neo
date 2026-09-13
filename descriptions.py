@@ -10,8 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import ImageGeneratorConfig
-from .engine.models import resolve_model_profile
-from .engine.types import V3_MODELS, V4_MODELS, V5_MODELS
+from .engine.models import V3_MODELS, V4_MODELS, V5_MODELS, resolve_model_profile
 
 
 def detect_model_generation(model: str, aliases: dict[str, str] | None = None) -> str:
@@ -139,15 +138,16 @@ def _model_specific_prompt_block(model: str, aliases: dict[str, str] | None = No
             "再用 The first/second/third comic panel shows... 逐格写英语自然语言动作与引号台词。\n"
             "  - 多角色使用 characters 独立描述并自由定位。x/y 是 0.0~1.0 连续归一化坐标，"
             "可使用 0.17、0.43、0.86 等任意小数精确模拟官网自由拖动，不要吸附或取整到 5×5 格点。"
-            "版权角色硬上限 22（官方），"
+            "V5 角色硬上限 32（代码与能力档案），"
             "原创角色因一致性建议不超过 6；每个角色 prompt 可混合身份/外貌/服装 Tag 与英语自然语言动作。"
             "坐标不可完全重叠，否则容易发生肢体黏连。V5 不要求 V4.5 的 5×5 网格，也不要强制套用"
             " source#/target#/mutual# 互动标签，复杂互动直接写清施动者、受动者和空间关系。\n"
             "  - 参数边界：Steps 固定使用管理员配置，AI Action 不得覆盖。Guidance、PGR 与 Variety+ "
             "不增加生成消耗，但默认也不覆盖配置；仅在明确需要纠正提示词服从度、过曝或复杂动态构图时调整。"
             "Guidance 通常为 4.5~6.5，PGR 通常为 0；复杂动作或漫画才考虑开启 Variety+。\n"
-            "  - 官网 UI 另有 Chunks 提示词收藏和 Enhance Max 放大，但它们不是 draw_image "
-            "的可调用参数；不要虚构 chunks 或 enhance_max 字段。\n"
+            "  - Chunks 提示词收藏是官网功能，不是调用参数。图片增强应单独调用 enhance_image；"
+            "V5 可把 upscale 设为 Max。不要虚构 chunks 或 enhance_max 字段，"
+            "也不要把它们传给 draw_image。\n"
             "  - 不支持 Vibe 与 Director Reference；需要参考图时改选白名单中的 V4.5 模型。"
         )
 
@@ -162,6 +162,7 @@ def _model_specific_prompt_block(model: str, aliases: dict[str, str] | None = No
         "  - 画面文字必须在主提示词中加入 text、english text、speech bubble 等标签，"
         "并在末尾空一行使用大写 `TEXT: 要显示的文字`；不要使用 V5 引号直出规则。\n"
         "  - 支持 Vibe（selected_vibes）与 Director Reference（selected_director_refs）。\n"
+        "  - 支持普通 Enhance；图片增强应单独调用 enhance_image，V4.5 不支持 Max。\n"
         "  - 多角色最多 6 个，使用 characters 的 x/y 坐标（对应官网 5×5 网格站位，"
         "如 B3 ≈ x 0.5 / y 0.5）；互动在角色提示词中成对使用"
         " source#/target#，对等互动使用 mutual#。\n"
@@ -192,7 +193,7 @@ def _multi_character_block(config: ImageGeneratorConfig) -> str:
     """构建多角色与互动说明。"""
     return (
         "**多角色参数格式**\n"
-        "使用 characters 参数传入 JSON 数组，V4.5 官方上限 6 人，V5 版权角色官方上限 22 人；"
+        "使用 characters 参数传入 JSON 数组，V4.5 官方上限 6 人，V5 代码与能力档案上限 32 人；"
         "V5 原创角色为保证一致性建议不超过 6 人。每项字段：\n"
         "  - prompt：角色专属提示词（必填）。V4.5 使用英文 Tag；V5 推荐英文 Tag 与英语自然语言混合，"
         "写明身份、外貌、服装、动作、互动对象及视线\n"

@@ -20,7 +20,6 @@ logger = get_logger("image_generator_plugin.inpaint_action")
 
 DEFAULT_MASK_SIZE = 0.5
 MIN_MASK_SIZE = 0.01
-FALLBACK_IMAGE_SIZE = (1024, 1024)
 
 
 class InpaintAction(BaseImageAction):
@@ -104,6 +103,18 @@ class InpaintAction(BaseImageAction):
             str,
             "场景专属额外排除词，英文逗号分隔。",
         ] = "",
+        selected_director_refs: Annotated[
+            str,
+            "V4.5 可选精密参考名称，多个用英文逗号分隔；其他模型留空。",
+        ] = "",
+        seed: Annotated[
+            int | None,
+            "可选随机种子，范围 0~999999999；留空时随机。",
+        ] = None,
+        noise: Annotated[
+            float | None,
+            "可选图生图噪声，范围 0~1；显式 0 会原样发送。",
+        ] = None,
         media_id: Annotated[
             str,
             "待处理图片的媒体 ID。用户发送的图片在上下文中以 "
@@ -143,9 +154,19 @@ class InpaintAction(BaseImageAction):
             await self.notify(hint)
             return False, hint
 
-        width, height = image_ops.read_image_size(image_b64)
-        if not width or not height:
-            width, height = FALLBACK_IMAGE_SIZE
+        try:
+            image_b64, width, height = image_ops.validate_image_data(
+                image_b64,
+                field="source_image",
+            )
+        except ValueError as error:
+            return False, f"源图片无效：{error}"
+        if not 0.01 <= strength <= 1.0:
+            return False, f"strength 必须在 0.01~1.0 之间（当前为 {strength!r}）"
+        if seed is not None and not 0 <= seed <= 999_999_999:
+            return False, f"seed 必须在 0..999999999 范围内，收到 {seed}"
+        if noise is not None and not 0.0 <= noise <= 1.0:
+            return False, f"noise 必须在 0.0~1.0 范围内，收到 {noise}"
 
         # 遮罩必须与最终发送给 API 的画幅一致，因此先完成缩放/对齐再生成遮罩。
         # NovelAI 要求画幅为 64 的倍数，未对齐的图片（如 1080x508）会导致 500。
@@ -174,6 +195,15 @@ class InpaintAction(BaseImageAction):
             cfg_rescale=pgr,
             variety_plus=variety_plus,
             render_text=render_text,
+            director_refs=engine.assets.select_director_refs(
+                tuple(
+                    name.strip()
+                    for name in selected_director_refs.split(",")
+                    if name.strip()
+                )
+            ),
+            seed=seed,
+            noise=noise,
         )
 
         async def _work() -> ImageResult:
@@ -190,7 +220,7 @@ class InpaintAction(BaseImageAction):
 
 
 def _parse_mask_area(raw: str | dict[str, Any]) -> tuple[float, float, float, float] | str:
-    """解析并夹紧遮罩区域参数。
+    """解析并校验遮罩区域参数。
 
     Args:
         raw: JSON 字符串或已解析的对象
@@ -217,9 +247,10 @@ def _parse_mask_area(raw: str | dict[str, Any]) -> tuple[float, float, float, fl
     except (TypeError, ValueError):
         return "mask_area 的 x/y/w/h 必须是数字"
 
-    return (
-        max(0.0, min(1.0, x)),
-        max(0.0, min(1.0, y)),
-        max(MIN_MASK_SIZE, min(1.0, w)),
-        max(MIN_MASK_SIZE, min(1.0, h)),
-    )
+    if not 0.0 <= x <= 1.0 or not 0.0 <= y <= 1.0:
+        return f"mask_area 的 x/y 必须在 0.0~1.0 之间（当前为 x={x!r}, y={y!r}）"
+    if not MIN_MASK_SIZE <= w <= 1.0 or not MIN_MASK_SIZE <= h <= 1.0:
+        return f"mask_area 的 w/h 必须在 {MIN_MASK_SIZE}~1.0 之间（当前为 w={w!r}, h={h!r}）"
+    if x + w > 1.0 or y + h > 1.0:
+        return f"mask_area 不得超出图片边界（当前为 x={x!r}, y={y!r}, w={w!r}, h={h!r}）"
+    return x, y, w, h

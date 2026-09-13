@@ -14,6 +14,7 @@ from src.app.plugin_system.api.log_api import get_logger
 
 from ..config import DirectorReferenceItemConfig, VibeItemConfig
 from ..media import image_ops
+from .models import resolve_model_profile
 from .settings import EngineSettings
 from .types import DirectorRefAsset, VibeAsset
 
@@ -31,26 +32,6 @@ VIBE_FILE_EXTENSIONS = (
 )
 PREENCODED_EXTENSIONS = (".naiv4vibe", ".naiv4vibebundle")
 TEXT_EXTENSIONS = (".naiv4vibe", ".naiv4vibebundle", ".json", ".txt")
-
-# NovelAI 导出文件中按模型分组的绝对精确编码键
-MODEL_ENCODING_KEYS: dict[str, str] = {
-    "nai-diffusion-5-full": "v5full",
-    "nai-diffusion-5-curated": "v5full",
-    "nai-diffusion-5-full-inpainting": "v5full",
-    "nai-diffusion-4-5-full": "v4-5full",
-    "nai-diffusion-4-5-curated": "v4-5full",
-    "nai-diffusion-4-5-full-inpainting": "v4-5full",
-    "nai-diffusion-4-5-curated-inpainting": "v4-5full",
-    "nai-diffusion-4-curated-preview": "v4",
-    "nai-diffusion-4-full": "v4full",
-    "nai-diffusion-4-curated": "v4",
-    "nai-diffusion-4-full-inpainting": "v4full",
-    "nai-diffusion-4-curated-inpainting": "v4",
-    "nai-diffusion-3": "v3",
-    "nai-diffusion-3-furry": "v3",
-    "nai-diffusion-3-inpainting": "v3",
-    "nai-diffusion-3-furry-inpainting": "v3",
-}
 
 VibeEncoder = Callable[[str, float, str], Awaitable[str | None]]
 
@@ -103,7 +84,7 @@ def read_preencoded_vector(file_path: Path, model: str) -> str | None:
     if not isinstance(encodings, dict) or not encodings:
         return None
 
-    key = MODEL_ENCODING_KEYS.get(model)
+    key = resolve_model_profile(model).vibe_encoding_key
     model_encodings = encodings.get(key) if key else None
     if not isinstance(model_encodings, dict) or not model_encodings:
         return None
@@ -112,7 +93,10 @@ def read_preencoded_vector(file_path: Path, model: str) -> str | None:
     if not isinstance(first_entry, dict):
         return None
     encoding = first_entry.get("encoding")
-    return encoding if isinstance(encoding, str) and encoding else None
+    if not isinstance(encoding, str) or not encoding:
+        return None
+    image_ops.decode_base64_blob(encoding, field="vibe_encoding")
+    return encoding
 
 
 class AssetLibrary:
@@ -236,11 +220,7 @@ class AssetLibrary:
         elif always_items or selectable_items:
             logger.info("模型白名单中没有支持 Vibe 的 V4.5 模型，跳过 Vibe 加载")
 
-        self._director_refs = (
-            self._load_director_refs(settings, director_items)
-            if vibe_model
-            else {}
-        )
+        self._director_refs = self._load_director_refs(settings, director_items)
         logger.info(f"精密参考池加载完成，共 {len(self._director_refs)} 个")
 
     async def _load_vibes(

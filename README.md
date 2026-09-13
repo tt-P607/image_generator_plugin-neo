@@ -69,14 +69,21 @@ noise_schedule = "karras"
 prompt_guidance_rescale = 0.0
 ```
 
-`available_models` 是 Bot 和 WebUI 可在单次调用中选择的严格白名单，非空时必须包含默认 `model`。留空则只允许默认模型。插件当前支持：
+`available_models` 是 Bot 和 WebUI 可在单次调用中选择的严格白名单，非空时必须包含默认 `model`。留空则只允许默认模型。插件依据官方原生与 OpenAI 兼容对接规范提供集中式模型能力矩阵：
 
-| 模型 | 提示词与主要能力 | 限制 |
-|---|---|---|
-| `nai-diffusion-5-full` / `nai-diffusion-5-curated` | 1471 Tokens；英文 Tag 加中、日、英文自然语言；引号文字、原生 Alpha、控制词、视觉小说资产和漫画 | 不支持 Vibe 与 Director Reference |
-| `nai-diffusion-4-5-full` / `nai-diffusion-4-5-curated` | 505 Tokens；稳定的英文 Tag 工作流；支持 Vibe 与 Director Reference | 不支持 V5 原生 Alpha、控制词和多语言自然语言工作流 |
+| 模型代际 | 包含模型 | 噪声调度 (noise_schedule) | Variety+ | Vibe | 角色参考 | 普通角色 | 步数上限 | 官方原生版本 |
+|---|---|---|---|---|---|---|---|---|
+| **V5** | `nai-diffusion-5-full`<br>`nai-diffusion-5-curated` | **不可选择，wire 固定 `karras`** | **不支持（彻底省略）** | 不支持 | 不支持 | 最多 32 人（自由坐标） | 28 步 | `params_version: 4` |
+| **V4.5** | `nai-diffusion-4-5-full`<br>`nai-diffusion-4-5-curated` | 支持（按 sampler 矩阵校验） | 支持 | 支持 | 支持 | 最多 6 人（5×5 网格） | 50 步 | `params_version: 4` |
+| **V4** | `nai-diffusion-4-full`<br>`nai-diffusion-4-curated-preview` | 支持（按 sampler 矩阵校验） | 支持 | 支持 | 不支持 | 最多 6 人（5×5 网格） | 50 步 | `params_version: 4` |
+| **V3** | `nai-diffusion-3`<br>`nai-diffusion-furry-3` | 支持（按 sampler 矩阵校验） | 支持 | 支持 | 不支持 | 不支持 | 50 步 | `params_version: 4` |
 
 Full 更适合精细控制，Curated 更偏稳定和审美一致。局部重绘会自动映射到同代 Inpainting 模型，不能把 `*-inpainting` 直接写入白名单。
+注意：当用户配置了全局 `noise_schedule` 并在不同模型间切换时，插件会保留本地偏好，
+在序列化最终请求时依据当前模型能力处理：使用 V5 时固定发送 `karras`，切换回
+V4.5/V4/V3 时按 sampler 矩阵校验并恢复可用偏好。V4/V4.5/V5 的旧 `ddim`
+配置会改写为 `k_euler_ancestral`；V4/V4.5 会依据改写前的 sampler 省略调度，
+V5 仍固定发送 `karras`。V3 保留 `ddim` 并省略调度。
 
 ### 第三方中转的模型名
 
@@ -124,6 +131,12 @@ model_aliases = { my-v5 = "nai-diffusion-5-full", my-v45 = "nai-diffusion-4-5-fu
 | `polyexponential` | Polyexponential |
 | `native` | Native |
 
+噪声调度会同时受模型代际和采样器限制：V3 常规采样器支持 `native`、`karras`、
+`exponential`、`polyexponential`；V4/V4.5 常规采样器不支持 `native`；`k_dpm_2`
+只支持 `exponential` 与 `polyexponential`；`k_dpm_2_ancestral` 是合法 sampler，
+但在 V3/V4/V4.5 下没有可选调度，因此不发送该字段。V5 隐藏该选择项，最终请求
+固定发送 `karras`。
+
 ### 角色外观与画风
 
 - `generation.character_prompt`：描述机器人自己的外观，适合自拍或画自己。
@@ -162,7 +175,11 @@ data/image_generator_plugin-neo/
 /画图 竖图 1girl, blue hair, outdoor
 /画图 横图 fantasy city --model nai-diffusion-5-full --steps 24 --scale 6
 /画图 方图 girl holding a sign "欢迎" --model nai-diffusion-5-curated --render-text
+/画图 竖图 1girl, blue hair --seed 0 --count 3
 ```
+
+`--count` 允许 `1~4`。插件始终逐张串行请求，Gateway 每次请求的 `n` 固定为 `1`；
+显式指定 seed 时，后续图片依次使用 `seed + 1`。
 
 ### 改图
 
@@ -176,6 +193,19 @@ data/image_generator_plugin-neo/
 
 强度越高，结果与原图差异越大；不填写时使用配置中的默认强度。
 
+### Enhance 与固定 2× 放大
+
+先引用一张图片，再执行普通 Enhance 或 V5 Max Enhance：
+
+```text
+/nai_edit enhance <完整提示词> [--model 模型ID] [--upscale 1x|1.5x|2x|Max] [--strength 0.5] [--noise 0] [--seed 0]
+```
+
+普通 Enhance 使用图生图管线，默认 Strength 为 `0.5`、Noise 为 `0`，并按源图面积
+开放 `1x`、`1.5x`、`2x`。`Max` 仅 V5 可用，会发送 `upscaled_enhance: true`；
+V4.5 只支持普通 Enhance。固定 2× Upscale 是独立的纯放大能力，不接受提示词、
+Strength 或 Noise，且源图面积不能超过 `1,048,576`。
+
 ### 精密参考图
 
 先引用一张图片，再发送：
@@ -187,7 +217,9 @@ data/image_generator_plugin-neo/
 也可以使用 `/nai_ref`。
 
 精密参考与图生图不同：它不会直接重绘原图，而是把参考图中的人物特征或画风用于生成一张新图片。
-精密参考仅支持 V4.5。白名单含 V4.5 时命令会自动选择其中一个，也可以通过 `--model` 明确指定。
+精密参考仅支持 V4.5，也可用于 V4.5 局部重绘。参考图会保持比例放入最接近原图
+比例的 `1024x1536`、`1536x1024` 或 `1472x1472` 黑底画布。白名单含 V4.5 时
+命令会自动选择其中一个，也可以通过 `--model` 明确指定。
 
 ### Vibe 素材
 
@@ -221,6 +253,8 @@ NovelAI 图片 API 不提供账号余额查询，因此“账号”命令只会�
 - 可选 Vibe。
 - 可选精密参考图。
 - 局部重绘。
+- 普通 Enhance 与 V5 Max Enhance。
+- 固定 2× 放大。
 - 去杂物。
 - 背景移除。
 - 线稿与草图转换。
@@ -280,6 +314,8 @@ route_path = "/plugins/image-generator"
 WebUI 可以：
 
 - 测试文生图。
+- 串行生成 1~4 张图片，并支持显式 seed。
+- 上传图片执行普通 Enhance 或 V5 Max Enhance。
 - 调整模型、画幅、采样参数和提示词。
 - 编辑 Vibe、精密参考和提示词预设。
 - 保存后立即让聊天侧使用新配置。
@@ -295,6 +331,17 @@ WebUI 不要求额外密码，也不会把 NovelAI Token 返回给浏览器。
 ### 提示词应该使用中文还是英文
 
 取决于本次选择的模型。V4.5 使用英文标签式提示词；V5 可用英文 Tag 建立主体，再以简体中文、繁体中文、日文或英文自然语言描述复杂动作、关系和画面文字。
+
+### 出现 HTTP 400 错误排查指南
+
+HTTP 400 属于客户端参数错误，网关或官方会在请求校验不通过时直接拒绝。常见原因与排查方法：
+
+1. **`noise_schedule` 校验失败**：V5 最终只允许 `karras`；旧模型按 sampler 能力矩阵校验。`k_dpm_2_ancestral` 不发送该字段，V4/V4.5 的旧 `ddim` 会改写 sampler 后省略该字段。
+2. **`steps` 步数越界**：V5 模型步数必须在 1~28 之间；其他模型在 1~50 之间。如果传入大于 28 的步数给 V5，会被严格拒绝。
+3. **分辨率或面积越界**：宽和高每边必须在 64~2048 之间，且必须按 64 对齐。V5 模型总像素不可超过 `1,048,576`（即 $1024 \times 1024$ 面积）。
+4. **模型能力不匹配的开关**：向 V5 模型发送了 Variety+（`variety_boost` / `skip_cfg_above_sigma`）、Vibe 或角色参考图。使用 V5 时插件会自动过滤这些不支持的参数。
+5. **角色数量超限**：V4/V4.5 最多 6 人，V5 最多 32 人，V3 不支持多角色。
+6. **未识别的模型名**：第三方模型名未包含版本关键词（如 4.5/5）且未配置 `model_aliases`。
 
 ### 出现 429
 

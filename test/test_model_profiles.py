@@ -6,6 +6,7 @@ import pytest
 
 from image_generator_plugin_neo.engine.models import (
     GENERATION_MODELS,
+    MODEL_PROFILES,
     get_model_profile,
 )
 
@@ -45,7 +46,7 @@ def test_v45_and_v5_profiles_expose_distinct_feature_boundaries() -> None:
     assert v5.supports_control_tags is True
     assert v5.supports_visual_novel_assets is True
     assert v5.supports_comics is True
-    assert v5.max_characters == 22
+    assert v5.max_characters == 32
     assert v5.recommended_original_characters == 6
 
 
@@ -54,6 +55,26 @@ def test_generation_models_exclude_inpainting_variants() -> None:
 
     assert "nai-diffusion-5-full" in GENERATION_MODELS
     assert "nai-diffusion-5-full-inpainting" not in GENERATION_MODELS
+
+
+def test_all_profiles_use_params_version_four() -> None:
+    """验证所有官方模型档案使用新版 params_version=4。"""
+
+    assert MODEL_PROFILES
+    assert {profile.params_version for profile in MODEL_PROFILES.values()} == {4}
+
+
+def test_v5_noise_schedule_is_fixed_but_not_user_selectable() -> None:
+    """验证 V5 不能选择调度，但最终 wire 能力固定为 karras。"""
+
+    profile = get_model_profile("nai-diffusion-5-full")
+
+    assert profile.supports_noise_schedule is False
+    assert profile.default_noise_schedule == "karras"
+    assert profile.allowed_noise_schedules("k_euler_ancestral") == frozenset(
+        {"karras"}
+    )
+    assert profile.allowed_noise_schedules("ddim") == frozenset()
 
 
 def test_unknown_model_is_rejected() -> None:

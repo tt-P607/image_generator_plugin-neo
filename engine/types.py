@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .models import V5_MODELS as V5_MODELS
-
 DirectorRefType = Literal["character", "style", "character&style"]
 DirectorToolType = Literal[
     "declutter",
@@ -20,27 +18,7 @@ DirectorToolType = Literal[
     "colorize",
     "emotion",
 ]
-
-# 固定的 NovelAI 官方支持模型集合（绝对匹配，禁止模糊/子串匹配）
-V4_MODELS: frozenset[str] = frozenset({
-    "nai-diffusion-4-5-full",
-    "nai-diffusion-4-5-curated",
-    "nai-diffusion-4-5-full-inpainting",
-    "nai-diffusion-4-5-curated-inpainting",
-    "nai-diffusion-4-full",
-    "nai-diffusion-4-curated",
-    "nai-diffusion-4-curated-preview",
-    "nai-diffusion-4-full-inpainting",
-    "nai-diffusion-4-curated-inpainting",
-})
-
-V3_MODELS: frozenset[str] = frozenset({
-    "nai-diffusion-3",
-    "nai-diffusion-3-furry",
-    "nai-diffusion-3-inpainting",
-    "nai-diffusion-3-furry-inpainting",
-})
-
+EnhanceScale = Literal["1x", "1.5x", "2x", "Max"]
 
 @dataclass(frozen=True, slots=True)
 class VibeAsset:
@@ -64,16 +42,18 @@ class DirectorRefAsset:
     """精密参考（Director Reference）图片数据。
 
     Attributes:
-        data: 已裁剪为 1024x1536 的 PNG base64
+        data: 已 contain 到最接近源比例的大画幅 PNG base64
         ref_type: 参考类型
         fidelity: 忠实度（0.0–1.0）
         strength: 参考强度（0.0–1.0）
+        information_extracted: 信息提取量（0.0–1.0）
     """
 
     data: str
     ref_type: DirectorRefType
     fidelity: float
     strength: float
+    information_extracted: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +86,13 @@ class GenerationSpec:
         scale: 覆盖引导比例，None 表示沿用配置值
         cfg_rescale: 覆盖 cfg_rescale，None 表示沿用配置值
         steps: 覆盖采样步数，None 表示沿用配置值
+        seed: 随机种子，None 表示自动生成
         variety_plus: 覆盖 Variety+，None 表示沿用配置值
         render_text: 是否需要生成画面文字，用于调整通用负面词
         source_image: 图生图原图 base64，非空即视为图生图
         strength: 图生图强度，None 表示沿用配置默认值
+        noise: 图生图噪声，None 表示使用官网默认值 0
+        upscaled_enhance: 是否启用 V5 Max Enhance
         model: 本次指定的模型名，None 表示沿用默认模型
         selected_vibe_names: LLM 自选的 Vibe 名称
         director_refs: 精密参考素材
@@ -125,10 +108,13 @@ class GenerationSpec:
     scale: float | None = None
     cfg_rescale: float | None = None
     steps: int | None = None
+    seed: int | None = None
     variety_plus: bool | None = None
     render_text: bool = False
     source_image: str | None = None
     strength: float | None = None
+    noise: float | None = None
+    upscaled_enhance: bool = False
     model: str | None = None
     selected_vibe_names: tuple[str, ...] = ()
     director_refs: tuple[DirectorRefAsset, ...] = ()
@@ -139,7 +125,7 @@ class GenerationSpec:
     def is_img2img(self) -> bool:
         """是否为图生图请求。"""
 
-        return bool(self.source_image)
+        return self.source_image is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,8 +144,11 @@ class InpaintSpec:
         scale: 覆盖引导比例
         cfg_rescale: 覆盖 cfg_rescale
         steps: 覆盖采样步数
+        seed: 随机种子，None 表示自动生成
+        noise: 图生图噪声，None 表示使用官网默认值 0
         variety_plus: 覆盖 Variety+
         render_text: 是否需要生成画面文字
+        director_refs: 精密参考素材
         from_command: 结果是否保存到命令图片目录
     """
 
@@ -174,8 +163,27 @@ class InpaintSpec:
     scale: float | None = None
     cfg_rescale: float | None = None
     steps: int | None = None
+    seed: int | None = None
+    noise: float | None = None
     variety_plus: bool | None = None
     render_text: bool = False
+    director_refs: tuple[DirectorRefAsset, ...] = ()
+    from_command: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EnhanceSpec:
+    """一次普通或 Max Enhance 请求的完整描述。"""
+
+    prompt: str
+    user_id: str
+    source_image: str
+    scale: EnhanceScale = "1.5x"
+    strength: float = 0.5
+    noise: float = 0.0
+    model: str | None = None
+    negative_prompt: str | None = None
+    seed: int | None = None
     from_command: bool = False
 
 

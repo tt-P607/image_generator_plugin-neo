@@ -94,18 +94,26 @@ DEFAULT_REFERENCE_TYPE = "character&style"
 DEFAULT_REFERENCE_FIDELITY = 1.0
 DEFAULT_REFERENCE_STRENGTH = 1.0
 
-# 允许带负号，使非法负值也能被识别并夹紧，而不是残留在提示词里。
+# 允许带负号，使非法负值也能被识别并明确报错，而不是残留在提示词里。
 _SCALE_FLAG_PATTERN = re.compile(
     r"--scale\s+(-?[\d.]+)|--rescale\s+(-?[\d.]+)",
     re.IGNORECASE,
 )
 _MODEL_FLAG_PATTERN = re.compile(r"--model\s+(\S+)", re.IGNORECASE)
 _STEPS_FLAG_PATTERN = re.compile(r"--steps\s+(\d+)", re.IGNORECASE)
+_SEED_FLAG_PATTERN = re.compile(r"--seed\s+(-?\d+)", re.IGNORECASE)
+_COUNT_FLAG_PATTERN = re.compile(r"--count\s+(-?\d+)", re.IGNORECASE)
 _VARIETY_FLAG_PATTERN = re.compile(
     r"--variety-plus\s+(true|false)",
     re.IGNORECASE,
 )
 _RENDER_TEXT_FLAG_PATTERN = re.compile(r"--render-text\b", re.IGNORECASE)
+_ENHANCE_FLAG_PATTERN = re.compile(
+    r"--upscale\s+(1x|1\.5x|2x|max)"
+    r"|--strength\s+(-?[\d.]+)"
+    r"|--noise\s+(-?[\d.]+)",
+    re.IGNORECASE,
+)
 _REFERENCE_FLAG_PATTERN = re.compile(
     r"--(?:type|参考类型)\s+(\S+)"
     r"|--fidelity\s+(-?[\d.]+)"
@@ -159,8 +167,20 @@ class GenerationFlags:
 
     model: str | None
     steps: int | None
+    seed: int | None
+    count: int
     variety_plus: bool | None
     render_text: bool
+    remainder: str
+
+
+@dataclass(frozen=True, slots=True)
+class EnhanceFlags:
+    """从命令文本中提取的 Enhance 参数。"""
+
+    upscale: str
+    strength: float
+    noise: float
     remainder: str
 
 
@@ -208,21 +228,33 @@ def extract_scale_flags(text: str) -> ScaleFlags:
 
 
 def extract_generation_flags(text: str) -> GenerationFlags:
-    """提取模型、步数、Variety+ 与画面文字开关。"""
+    """提取模型、步数、seed、数量与生成策略开关。"""
 
     model_match = _MODEL_FLAG_PATTERN.search(text)
     steps_match = _STEPS_FLAG_PATTERN.search(text)
+    seed_match = _SEED_FLAG_PATTERN.search(text)
+    count_match = _COUNT_FLAG_PATTERN.search(text)
     variety_match = _VARIETY_FLAG_PATTERN.search(text)
     render_text = _RENDER_TEXT_FLAG_PATTERN.search(text) is not None
 
     remainder = _MODEL_FLAG_PATTERN.sub("", text)
     remainder = _STEPS_FLAG_PATTERN.sub("", remainder)
+    remainder = _SEED_FLAG_PATTERN.sub("", remainder)
+    remainder = _COUNT_FLAG_PATTERN.sub("", remainder)
     remainder = _VARIETY_FLAG_PATTERN.sub("", remainder)
     remainder = _RENDER_TEXT_FLAG_PATTERN.sub("", remainder)
 
+    seed = int(seed_match.group(1)) if seed_match else None
+    count = int(count_match.group(1)) if count_match else 1
+    if seed is not None and not 0 <= seed <= 999_999_999:
+        raise ValueError(f"seed 必须在 0..999999999 范围内，收到 {seed}")
+    if not 1 <= count <= 4:
+        raise ValueError(f"count 必须在 1..4 范围内，收到 {count}")
     return GenerationFlags(
         model=model_match.group(1) if model_match else None,
         steps=int(steps_match.group(1)) if steps_match else None,
+        seed=seed,
+        count=count,
         variety_plus=(
             variety_match.group(1).lower() == "true"
             if variety_match
@@ -249,16 +281,24 @@ def extract_reference_flags(text: str) -> ReferenceFlags:
     def _capture(match: re.Match[str]) -> str:
         nonlocal ref_type, fidelity, strength
         if match.group(1) is not None:
-            ref_type = REFERENCE_TYPE_ALIASES.get(
-                match.group(1).strip(),
-                DEFAULT_REFERENCE_TYPE,
-            )
+            raw_type = match.group(1).strip()
+            if raw_type not in REFERENCE_TYPE_ALIASES:
+                raise ValueError(f"不支持的参考类型 {raw_type!r}")
+            ref_type = REFERENCE_TYPE_ALIASES[raw_type]
         parsed_fidelity = _to_float(match.group(2))
         if parsed_fidelity is not None:
-            fidelity = max(0.0, min(1.0, parsed_fidelity))
+            if not 0.0 <= parsed_fidelity <= 1.0:
+                raise ValueError(
+                    f"fidelity 必须在 0.0~1.0 之间（当前为 {parsed_fidelity!r}）"
+                )
+            fidelity = parsed_fidelity
         parsed_strength = _to_float(match.group(3))
         if parsed_strength is not None:
-            strength = max(0.0, min(1.0, parsed_strength))
+            if not 0.0 <= parsed_strength <= 1.0:
+                raise ValueError(
+                    f"strength 必须在 0.0~1.0 之间（当前为 {parsed_strength!r}）"
+                )
+            strength = parsed_strength
         return ""
 
     remainder = _clean(_REFERENCE_FLAG_PATTERN.sub(_capture, text))
@@ -268,6 +308,37 @@ def extract_reference_flags(text: str) -> ReferenceFlags:
         strength=strength,
         remainder=remainder,
     )
+
+
+def extract_enhance_flags(text: str) -> EnhanceFlags:
+    """提取并严格校验 Enhance 倍率、强度和噪声。"""
+
+    upscale = "1.5x"
+    strength = 0.5
+    noise = 0.0
+
+    def _capture(match: re.Match[str]) -> str:
+        nonlocal upscale, strength, noise
+        if match.group(1) is not None:
+            upscale = "Max" if match.group(1).lower() == "max" else match.group(1)
+        parsed_strength = _to_float(match.group(2))
+        if parsed_strength is not None:
+            if not 0.01 <= parsed_strength <= 0.99:
+                raise ValueError(
+                    f"strength 必须在 0.01~0.99 之间（当前为 {parsed_strength!r}）"
+                )
+            strength = parsed_strength
+        parsed_noise = _to_float(match.group(3))
+        if parsed_noise is not None:
+            if not 0.0 <= parsed_noise <= 0.99:
+                raise ValueError(
+                    f"noise 必须在 0.0~0.99 之间（当前为 {parsed_noise!r}）"
+                )
+            noise = parsed_noise
+        return ""
+
+    remainder = _clean(_ENHANCE_FLAG_PATTERN.sub(_capture, text))
+    return EnhanceFlags(upscale, strength, noise, remainder)
 
 
 def split_prompt(text: str) -> tuple[str, str | None]:
@@ -332,9 +403,13 @@ def parse_edit_args(args: list[str]) -> tuple[str, float | None]:
 
     for arg in args:
         value = _to_float(arg)
-        if value is not None and EDIT_STRENGTH_MIN <= value <= EDIT_STRENGTH_MAX:
-            strength = value
-        else:
+        if value is None:
             prompt_parts.append(arg)
+            continue
+        if not EDIT_STRENGTH_MIN <= value <= EDIT_STRENGTH_MAX:
+            raise ValueError(
+                f"strength 必须在 {EDIT_STRENGTH_MIN}~{EDIT_STRENGTH_MAX} 之间（当前为 {value!r}）"
+            )
+        strength = value
 
     return " ".join(prompt_parts) or DEFAULT_EDIT_PROMPT, strength

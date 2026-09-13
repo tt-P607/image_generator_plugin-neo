@@ -1,7 +1,7 @@
 {
   "name": "image_generator_plugin-neo",
   "display_name": "NovelAI 绘图",
-  "version": "2.7.1",
+  "version": "2.8.0",
   "description": "支持 NovelAI 官方 API 与 OpenAI 兼容 Gateway 的图片生成、编辑、Vibe 和 Director 工具插件",
   "author": "言柒",
   "categories": [
@@ -33,6 +33,18 @@
     {
       "component_type": "action",
       "component_name": "edit_image",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "enhance_image",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "upscale_image",
       "dependencies": [],
       "enabled": true
     },
@@ -93,6 +105,12 @@
     {
       "component_type": "command",
       "component_name": "nai_vibe",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "command",
+      "component_name": "nai_upscale",
       "dependencies": [],
       "enabled": true
     },

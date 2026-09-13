@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import cmd_route
 
-from ..engine import DirectorRefAsset, GenerationSpec, ImageResult
+from ..engine import DirectorRefAsset, EnhanceScale, EnhanceSpec, GenerationSpec, ImageResult
 from ..media import extract_image_from_stream_id
 from . import parsing, replies
 from .base import BaseImageCommand
@@ -58,7 +60,11 @@ class ImageGeneratorCommand(BaseImageCommand):
             await self.reply("服务还没准备好呢，稍等一下")
             return False, "引擎未初始化"
 
-        generation_flags = parsing.extract_generation_flags(raw_text)
+        try:
+            generation_flags = parsing.extract_generation_flags(raw_text)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
         flags = parsing.extract_scale_flags(generation_flags.remainder)
         tokens = flags.remainder.split()
         if not tokens:
@@ -111,11 +117,12 @@ class ImageGeneratorCommand(BaseImageCommand):
             steps=generation_flags.steps,
             variety_plus=generation_flags.variety_plus,
             render_text=generation_flags.render_text,
+            seed=generation_flags.seed,
             from_command=True,
         )
 
-        async def _work() -> ImageResult:
-            return await engine.generate(spec)
+        async def _work() -> tuple[ImageResult, ...]:
+            return await engine.generate_many(spec, generation_flags.count)
 
         return await self.run_generation(
             _work,
@@ -151,6 +158,60 @@ class ImageEditCommand(BaseImageCommand):
 
         return await self._edit(self.command_body("edit"))
 
+    @cmd_route("enhance")
+    async def handle_enhance(self) -> tuple[bool, str]:
+        """处理 ``/nai_edit enhance`` 子路由。"""
+
+        return await self._enhance(self.command_body("enhance"))
+
+    async def _enhance(self, raw_text: str) -> tuple[bool, str]:
+        """增强引用图片。"""
+
+        engine = self.engine
+        if engine is None:
+            return False, "引擎未初始化"
+        image_b64 = await extract_image_from_stream_id(self.stream_id, self._message)
+        if not image_b64:
+            await self.reply("需要引用一张图片才能增强")
+            return False, "未找到引用图片"
+        try:
+            generation_flags = parsing.extract_generation_flags(raw_text)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
+        try:
+            flags = parsing.extract_enhance_flags(generation_flags.remainder)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
+        prompt = flags.remainder.strip()
+        if not prompt:
+            await self.reply("Enhance 需要原图对应的完整提示词")
+            return False, "缺少提示词"
+        await self.reply(f"开始增强图片（{flags.upscale}）")
+        spec = EnhanceSpec(
+            prompt=prompt,
+            user_id=self.user_scope,
+            source_image=image_b64,
+            scale=cast(EnhanceScale, flags.upscale),
+            strength=flags.strength,
+            noise=flags.noise,
+            model=generation_flags.model,
+            seed=generation_flags.seed,
+            from_command=True,
+        )
+
+        async def _work() -> ImageResult:
+            return await engine.enhance(spec)
+
+        return await self.run_generation(
+            _work,
+            task_name=f"cmd_enhance_{self.user_scope}",
+            purpose="command_enhance",
+            success_hints=replies.EDIT_SUCCESS_HINTS,
+            success_key="edit_success",
+        )
+
     async def _edit(self, raw_text: str) -> tuple[bool, str]:
         """执行图生图。
 
@@ -165,7 +226,11 @@ class ImageEditCommand(BaseImageCommand):
             await self.reply("服务还没准备好呢，稍等一下")
             return False, "引擎未初始化"
 
-        generation_flags = parsing.extract_generation_flags(raw_text)
+        try:
+            generation_flags = parsing.extract_generation_flags(raw_text)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
         tokens = generation_flags.remainder.split()
         if not tokens:
             await self.reply("想改图的话，先引用一张图片然后告诉我怎么改")
@@ -176,8 +241,12 @@ class ImageEditCommand(BaseImageCommand):
             await self.reply("我需要一张图片才能帮你修改呀，记得引用图片哦")
             return False, "未找到引用图片"
 
-        prompt, strength = parsing.parse_edit_args(tokens)
-        strength_text = f"，修改强度 {strength}" if strength else ""
+        try:
+            prompt, strength = parsing.parse_edit_args(tokens)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
+        strength_text = f"，修改强度 {strength}" if strength is not None else ""
         await self.reply(
             replies.pick(replies.START_EDITING_HINTS, "start_edit").format(
                 strength=strength_text
@@ -193,11 +262,12 @@ class ImageEditCommand(BaseImageCommand):
             render_text=generation_flags.render_text,
             source_image=image_b64,
             strength=strength,
+            seed=generation_flags.seed,
             from_command=True,
         )
 
-        async def _work() -> ImageResult:
-            return await engine.generate(spec)
+        async def _work() -> tuple[ImageResult, ...]:
+            return await engine.generate_many(spec, generation_flags.count)
 
         return await self.run_generation(
             _work,
@@ -260,8 +330,18 @@ class ImageReferenceCommand(BaseImageCommand):
             await self.reply("需要引用一张图片才能精确参考哦，回复一张图片再发命令试试")
             return False, "未找到引用图片"
 
-        generation_flags = parsing.extract_generation_flags(raw_text)
-        reference_flags = parsing.extract_reference_flags(generation_flags.remainder)
+        try:
+            generation_flags = parsing.extract_generation_flags(raw_text)
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
+        try:
+            reference_flags = parsing.extract_reference_flags(
+                generation_flags.remainder
+            )
+        except ValueError as error:
+            await self.reply(str(error))
+            return False, str(error)
         scale_flags = parsing.extract_scale_flags(reference_flags.remainder)
         prompt, negative_prompt = parsing.split_prompt(scale_flags.remainder)
         if not prompt:
@@ -289,6 +369,7 @@ class ImageReferenceCommand(BaseImageCommand):
             steps=generation_flags.steps,
             variety_plus=generation_flags.variety_plus,
             render_text=generation_flags.render_text,
+            seed=generation_flags.seed,
             director_refs=(
                 DirectorRefAsset(
                     data=image_b64,
@@ -300,8 +381,8 @@ class ImageReferenceCommand(BaseImageCommand):
             from_command=True,
         )
 
-        async def _work() -> ImageResult:
-            return await engine.generate(spec)
+        async def _work() -> tuple[ImageResult, ...]:
+            return await engine.generate_many(spec, generation_flags.count)
 
         return await self.run_generation(
             _work,

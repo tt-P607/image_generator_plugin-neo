@@ -20,15 +20,18 @@ from .actions import (
     DeclutterAction,
     DrawAction,
     EditImageAction,
+    EnhanceAction,
     EmotionAction,
     InpaintAction,
     LineartAction,
     SketchAction,
+    UpscaleAction,
 )
 from .commands import (
     ImageEditCommand,
     ImageGeneratorCommand,
     ImageReferenceCommand,
+    ImageUpscaleCommand,
     VibeManagementCommand,
 )
 from .config import ImageGeneratorConfig
@@ -211,6 +214,10 @@ class ImageGeneratorPlugin(BasePlugin):
                 components.append(InpaintAction)
             if config.components.edit_action_enabled:
                 components.append(EditImageAction)
+            if config.components.enhance_action_enabled:
+                components.append(EnhanceAction)
+            if config.components.upscale_action_enabled:
+                components.append(UpscaleAction)
             components.extend(
                 action
                 for flag, action in DIRECTOR_ACTIONS
@@ -226,6 +233,8 @@ class ImageGeneratorPlugin(BasePlugin):
                     VibeManagementCommand,
                 ]
             )
+            if config.components.upscale_command_enabled:
+                components.append(ImageUpscaleCommand)
 
         if config.webui.enabled:
             components.append(WebUIRouter)

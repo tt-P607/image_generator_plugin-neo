@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 
 from image_generator_plugin_neo.config import ImageGeneratorConfig
 from image_generator_plugin_neo.engine.engine import ImageEngine
@@ -14,11 +15,25 @@ from image_generator_plugin_neo.engine.types import (
     CharacterPrompt,
     DirectorRefAsset,
     DirectorToolSpec,
+    EnhanceSpec,
     GenerationSpec,
+    ImageResult,
     InpaintSpec,
     UserVibeStore,
     VibeAsset,
 )
+from image_generator_plugin_neo.media import enhance as enhance_ops
+
+
+def encoded_image(width: int = 832, height: int = 1216) -> str:
+    """构造测试用 PNG Base64。"""
+
+    import base64
+    import io
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def make_settings(**overrides: object) -> EngineSettings:
@@ -35,7 +50,7 @@ def make_settings(**overrides: object) -> EngineSettings:
 
 @pytest.mark.asyncio
 async def test_engine_uses_official_character_limit_from_selected_model() -> None:
-    """验证 V5 可使用 22 个角色且不会再受全局配置限制。"""
+    """验证 V5 可使用 32 个角色且不会再受全局配置限制。"""
 
     config = ImageGeneratorConfig()
     config.generation.model = "nai-diffusion-5-full"
@@ -46,7 +61,7 @@ async def test_engine_uses_official_character_limit_from_selected_model() -> Non
     engine = ImageEngine(config)
     engine._submit = AsyncMock(return_value=object())  # type: ignore[method-assign]
     v5_characters = tuple(
-        CharacterPrompt(prompt=f"character {index}") for index in range(22)
+        CharacterPrompt(prompt=f"character {index}") for index in range(32)
     )
 
     await engine.generate(
@@ -87,7 +102,7 @@ def test_gateway_root_normalizes_v1_suffix() -> None:
 def test_official_urls_derive_from_base_url() -> None:
     """验证 official 渠道各端点由 base_url 推导。"""
 
-    settings = make_settings()
+    settings = make_settings(model="nai-diffusion-4-5-full")
     assert settings.official_generate_url.endswith("/ai/generate-image")
     assert settings.official_encode_vibe_url.endswith("/ai/encode-vibe")
     assert settings.official_augment_url.endswith("/ai/augment-image")
@@ -96,20 +111,176 @@ def test_official_urls_derive_from_base_url() -> None:
 
 
 def test_upscale_payloads_match_channel_protocols() -> None:
-    """验证 upscale 请求体：official 固定 scale=4，gateway 走统一端点带 extra。"""
+    """验证 upscale 请求体：两种渠道均使用固定 2× 放大协议。"""
 
     official = payload_builder.build_official_upscale("img", 512, 512)
-    assert official == {"image": "img", "width": 512, "height": 512, "scale": 4}
+    assert official == {
+        "image": "img",
+        "model": "nai-diffusion-5-curated",
+        "declared_blur_sigma": 0,
+    }
 
     gateway = payload_builder.build_gateway_upscale("img", 512, 512, "nai-diffusion-4-5-full")
     assert gateway == {
         "model": "nai-diffusion-4-5-full",
         "extra": "upscale",
         "image": "img",
-        "width": 512,
-        "height": 512,
         "response_format": "b64_json",
     }
+
+
+def test_enhance_planner_matches_official_scale_and_alignment_rules() -> None:
+    """验证官网 Enhance 倍率候选、64 对齐与提示词片段。"""
+
+    assert enhance_ops.available_scales(832, 1216, supports_max=False) == (
+        "1x",
+        "1.5x",
+    )
+    assert enhance_ops.available_scales(832, 1216, supports_max=True) == (
+        "1x",
+        "1.5x",
+        "Max",
+    )
+    assert enhance_ops.pipeline_dimensions(832, 1216, "1.5x") == (1280, 1856)
+    assert enhance_ops.pipeline_dimensions(801, 1000, "Max") == (832, 1024)
+    assert enhance_ops.append_prompt_suffix("1girl") == (
+        "1girl, -2::upscaled, blurry::,"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enhance_builds_single_img2img_request_for_max() -> None:
+    """验证 V5 Max 构造独立单图 img2img 请求。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-curated"
+    engine = ImageEngine(config)
+    engine._run_generate = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("enhanced.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    result = await engine.enhance(
+        EnhanceSpec(
+            prompt="1girl",
+            user_id="tester",
+            source_image=encoded_image(801, 1000),
+            scale="Max",
+            strength=0.5,
+            noise=0.0,
+            seed=0,
+        )
+    )
+
+    assert result.success is True
+    generation = engine._run_generate.await_args.args[0]
+    assert (generation.width, generation.height) == (832, 1024)
+    assert generation.seed == 0
+    assert generation.noise == 0.0
+    assert generation.upscaled_enhance is True
+    assert engine._run_generate.await_args.kwargs == {"prepare_img2img": False}
+
+
+@pytest.mark.asyncio
+async def test_v45_rejects_max_enhance_before_queue() -> None:
+    """验证 V4.5 不允许 Max Enhance。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-4-5-full"
+    engine = ImageEngine(config)
+    engine._submit = AsyncMock()  # type: ignore[method-assign]
+    result = await engine.enhance(
+        EnhanceSpec(
+            prompt="1girl",
+            user_id="tester",
+            source_image=encoded_image(),
+            scale="Max",
+        )
+    )
+    assert result.success is False
+    assert "enhance_scale" in result.message
+    engine._submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enhance_rejects_unsupported_model_and_invalid_seed() -> None:
+    """验证 Engine 最终边界拒绝不支持 Enhance 的模型及非法 seed。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-4-full"
+    engine = ImageEngine(config)
+    source = encoded_image()
+    unsupported = await engine.enhance(
+        EnhanceSpec(
+            prompt="1girl",
+            user_id="tester",
+            source_image=source,
+            scale="1x",
+        )
+    )
+    assert unsupported.success is False
+    assert "nai-diffusion-4-full" in unsupported.message
+    assert "enhance_scale" in unsupported.message
+
+    config.generation.model = "nai-diffusion-5-curated"
+    engine = ImageEngine(config)
+    invalid_seed = await engine.enhance(
+        EnhanceSpec(
+            prompt="1girl",
+            user_id="tester",
+            source_image=source,
+            scale="1x",
+            seed=1_000_000_000,
+        )
+    )
+    assert invalid_seed.success is False
+    assert "nai-diffusion-5-curated" in invalid_seed.message
+    assert "seed" in invalid_seed.message
+
+
+@pytest.mark.asyncio
+async def test_generate_many_uses_sequential_single_requests_and_increments_seed() -> None:
+    """验证多图由插件逐张调用单图生成并递增显式 seed。"""
+
+    engine = ImageEngine(ImageGeneratorConfig())
+    engine.generate = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[ImageResult.ok(f"{index}.png") for index in range(3)]
+    )
+    results = await engine.generate_many(
+        GenerationSpec(prompt="1girl", user_id="tester", seed=0),
+        3,
+    )
+    assert len(results) == 3
+    assert [call.args[0].seed for call in engine.generate.await_args_list] == [0, 1, 2]
+
+
+def test_enhance_payload_preserves_zero_and_gateway_single_count() -> None:
+    """验证 Enhance 的 seed/noise 显式零及 Gateway n=1。"""
+
+    spec = GenerationSpec(
+        prompt="1girl",
+        user_id="tester",
+        source_image=encoded_image(),
+        strength=0.5,
+        noise=0.0,
+        seed=0,
+        upscaled_enhance=True,
+    )
+    settings = make_settings(model="nai-diffusion-5-curated")
+    official = payload_builder.build_official_generation(settings, spec, ())
+    gateway = payload_builder.build_gateway_generation(settings, spec)
+    assert official["parameters"]["seed"] == 0
+    assert official["parameters"]["noise"] == 0.0
+    assert official["parameters"]["upscaled_enhance"] is True
+    assert gateway["n"] == 1
+    assert gateway["params"]["seed"] == 0
+    assert gateway["noise"] == 0.0
+    assert gateway["params"]["upscaled_enhance"] is True
 
 
 def test_output_dir_switches_by_source() -> None:
@@ -129,29 +300,38 @@ def test_merge_negative_prompts_keeps_order_and_dedupes() -> None:
     assert payload_builder.merge_negative_prompts("blurry", None) == "blurry"
 
 
-def test_official_generation_fills_v4_multi_character_fields() -> None:
-    """验证 V4 多人物会同时写入 characterPrompts 与 char_captions。"""
+def test_v45_character_positions_snap_to_official_grid_in_both_channels() -> None:
+    """验证 V4.5 双渠道角色坐标吸附到官网 5×5 单元中心。"""
 
-    settings = make_settings()
+    settings = make_settings(model="nai-diffusion-4-5-full")
     spec = GenerationSpec(
         prompt="2girls, outdoor",
         user_id="tester",
         characters=(
-            CharacterPrompt(prompt="1girl, red hair", negative_prompt="bad hands", x=0.3),
-            CharacterPrompt(prompt="1girl, blue hair", x=0.7),
+            CharacterPrompt(
+                prompt="1girl, red hair",
+                negative_prompt="bad hands",
+                x=0.19,
+                y=1.0,
+            ),
+            CharacterPrompt(prompt="1girl, blue hair", x=0.79, y=-0.1),
         ),
     )
 
-    body = payload_builder.build_official_generation(settings, spec, ())
-    parameters = body["parameters"]
+    official = payload_builder.build_official_generation(settings, spec, ())
+    parameters = official["parameters"]
+    gateway = payload_builder.build_gateway_generation(settings, spec)
 
-    assert body["action"] == "generate"
+    assert official["action"] == "generate"
     assert len(parameters["characterPrompts"]) == 2
-    assert parameters["characterPrompts"][0]["center"] == {"x": 0.3, "y": 0.5}
+    assert parameters["characterPrompts"][0]["center"] == {"x": 0.1, "y": 0.9}
+    assert parameters["characterPrompts"][1]["center"] == {"x": 0.7, "y": 0.1}
     assert parameters["use_coords"] is True
     assert parameters["v4_prompt"]["caption"]["char_captions"][1]["char_caption"] == (
         "1girl, blue hair"
     )
+    assert gateway["params"]["characters"][0]["center"] == {"x": 0.1, "y": 0.9}
+    assert gateway["params"]["characters"][1]["center"] == {"x": 0.7, "y": 0.1}
 
 
 def test_v5_character_positions_preserve_continuous_coordinates() -> None:
@@ -178,8 +358,10 @@ def test_v5_character_positions_preserve_continuous_coordinates() -> None:
         "x": 0.86,
         "y": 0.72,
     }
-    assert gateway["params"]["characters"][0]["position"] == [0.17, 0.43]
-    assert gateway["params"]["characters"][1]["position"] == [0.86, 0.72]
+    assert gateway["params"]["characters"][0]["center"] == {"x": 0.17, "y": 0.43}
+    assert gateway["params"]["characters"][1]["center"] == {"x": 0.86, "y": 0.72}
+    assert "position" not in gateway["params"]["characters"][0]
+    assert "position" not in gateway["params"]["characters"][1]
 
 
 def test_official_generation_switches_to_img2img() -> None:
@@ -245,6 +427,46 @@ def test_official_inpaint_uses_infill_model_and_keeps_original() -> None:
     assert body["parameters"]["mask"] == "mask"
 
 
+def test_v45_inpaint_keeps_director_reference_in_both_channels() -> None:
+    """验证 V4.5 局部重绘在双渠道中保留精密角色参考。"""
+
+    reference = DirectorRefAsset(
+        data="reference-image",
+        ref_type="character",
+        fidelity=0.0,
+        strength=0.0,
+        information_extracted=0.0,
+    )
+    spec = InpaintSpec(
+        prompt="1girl, pink dress",
+        source_image="image",
+        mask="mask",
+        strength=0.6,
+        model="nai-diffusion-4-5-full",
+        director_refs=(reference,),
+    )
+    settings = make_settings(model="nai-diffusion-4-5-full")
+
+    official = payload_builder.build_official_inpaint(settings, spec)
+    official_params = official["parameters"]
+    gateway = payload_builder.build_gateway_inpaint(settings, spec)
+
+    assert official_params["director_reference_images"] == ["reference-image"]
+    assert official_params["director_reference_strength_values"] == [0.0]
+    assert official_params["director_reference_secondary_strength_values"] == [1.0]
+    assert official_params["director_reference_information_extracted"] == [0.0]
+    assert gateway["n"] == 1
+    assert gateway["params"]["character_references"] == [
+        {
+            "image": "reference-image",
+            "type": "character",
+            "strength": 0.0,
+            "fidelity": 0.0,
+            "information_extracted": 0.0,
+        }
+    ]
+
+
 def test_gateway_generation_matches_openai_image_schema() -> None:
     """验证 Gateway 文生图字段符合新版 OpenAI 图片接口约定（参数收进 params）。"""
 
@@ -281,7 +503,8 @@ def test_gateway_generation_matches_openai_image_schema() -> None:
     assert params["quality"] is True
     assert params["uc_preset"] in {"strong", "light", "furry_focus", "human_focus", "none"}
     assert "text," in f"{params['negative_prompt']},"
-    assert params["characters"][0]["position"] == [0.3, 0.5]
+    assert params["characters"][0]["center"] == {"x": 0.3, "y": 0.5}
+    assert "position" not in params["characters"][0]
     assert params["character_references"][0]["fidelity"] == 0.75
 
 
@@ -330,14 +553,14 @@ def test_gateway_director_uses_unified_endpoint_with_extra() -> None:
             width=1024,
             height=1024,
             prompt="warm tones",
-            defry=9,
+            defry=0,
         ),
         "nai-diffusion-4-5-full",
     )
     assert colorize["extra"] == "director-colorize"
     assert colorize["model"] == "nai-diffusion-4-5-full"
     assert colorize["prompt"] == "warm tones"
-    assert colorize["defry"] == 5
+    assert colorize["defry"] == 0
 
     lineart = payload_builder.build_gateway_director(
         DirectorToolSpec(
@@ -415,7 +638,7 @@ def test_alias_model_resolves_profile_and_keeps_request_name() -> None:
 
     assert settings.resolve_model("my-v5") == "nai-diffusion-5-full"
     assert settings.model_profile("my-v5").is_v5 is True
-    assert settings.model_profile("my-v5").max_characters == 22
+    assert settings.model_profile("my-v5").max_characters == 32
     assert settings.model_profile("my-v5").supports_vibe is False
 
     spec = GenerationSpec(
@@ -429,6 +652,7 @@ def test_alias_model_resolves_profile_and_keeps_request_name() -> None:
     assert official["model"] == "my-v5"
     assert gateway["model"] == "my-v5"
     assert official["parameters"]["noise_schedule"] == "karras"
+    assert gateway["params"]["noise_schedule"] == "karras"
     assert official["parameters"]["v4_prompt"]["use_coords"] is True
 
 
@@ -452,7 +676,7 @@ def test_keyword_inference_resolves_third_party_model_names() -> None:
     v5 = settings.model_profile("some-v5-model")
     assert v5.is_v5 is True
     assert v5.edition == "full"
-    assert v5.max_characters == 22
+    assert v5.max_characters == 32
     assert v5.supports_vibe is False
 
     spec = GenerationSpec(prompt="1girl", user_id="tester")
@@ -466,6 +690,22 @@ def test_unrecognizable_model_name_fails_clearly() -> None:
     config = ImageGeneratorConfig()
     config.generation.model = "totally-unknown-model"
     with pytest.raises(ValueError, match="无法识别模型"):
+        EngineSettings.from_config(config)
+
+
+def test_from_config_validates_sampling_matrix_for_all_allowed_models() -> None:
+    """验证引擎快照构造时会校验白名单内每个模型的采样组合。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-full"
+    config.generation.available_models = [
+        "nai-diffusion-5-full",
+        "nai-diffusion-4-5-full",
+    ]
+    config.generation.sampler = "k_dpm_2"
+    config.generation.noise_schedule = "karras"
+
+    with pytest.raises(ValueError, match="不支持噪声调度"):
         EngineSettings.from_config(config)
 
 
@@ -571,12 +811,12 @@ def test_official_generation_per_request_model_switches_schema() -> None:
         model="nai-diffusion-3",
     )
     settings = make_settings(model="nai-diffusion-5-full")
-    settings.model_aliases["nai-diffusion-3"] = "nai-diffusion-4-5-full"
     body = payload_builder.build_official_generation(settings, spec, ())
 
     assert body["model"] == "nai-diffusion-3"
     assert body["parameters"]["noise_schedule"] == "karras"
-    assert "v4_prompt" in body["parameters"]
+    assert "v4_prompt" not in body["parameters"]
+    assert "characterPrompts" not in body["parameters"]
 
 
 def test_generation_overrides_apply_to_both_channels() -> None:
@@ -585,6 +825,7 @@ def test_generation_overrides_apply_to_both_channels() -> None:
     spec = GenerationSpec(
         prompt='1girl, holding sign, "Welcome"',
         user_id="tester",
+        model="nai-diffusion-4-5-full",
         steps=24,
         scale=6.0,
         cfg_rescale=0.2,
@@ -592,6 +833,7 @@ def test_generation_overrides_apply_to_both_channels() -> None:
         render_text=True,
     )
     settings = make_settings(
+        model="nai-diffusion-4-5-full",
         steps=28,
         scale=5.0,
         cfg_rescale=0.0,

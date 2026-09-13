@@ -96,6 +96,7 @@ select option { background: var(--panel); }
 
 /* 出图预览 */
 .preview-img { width: 100%; border-radius: var(--radius); border: 1px solid var(--line); }
+.preview-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px; }
 .preview-placeholder {
   background: var(--bg-2); border: 1px dashed var(--line-2);
   border-radius: var(--radius); padding: 48px 20px; text-align: center;
@@ -191,6 +192,16 @@ select option { background: var(--panel); }
           <label>CFG Rescale（留空用配置值）</label>
           <input type="number" id="genRescale" step="0.1" placeholder="0.0" />
         </div>
+        <div>
+          <label>Seed（留空随机）</label>
+          <input type="number" id="genSeed" min="0" max="999999999" />
+        </div>
+      </div>
+      <div class="grid-3" style="margin-bottom: 12px;">
+        <div>
+          <label>图片数量</label>
+          <select id="genCount"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select>
+        </div>
         <div style="display:flex; flex-direction:column; justify-content:center; gap:8px; padding-top:18px">
           <label class="toggle"><input type="checkbox" id="genVarietyPlus" /> Variety+</label>
           <label class="toggle"><input type="checkbox" id="genRenderText" /> 需要画面文字</label>
@@ -204,6 +215,18 @@ select option { background: var(--panel); }
         <button class="btn-primary" id="genBtn">🚀 出图</button>
         <span id="genStatus" class="status-text"></span>
       </div>
+      <hr />
+      <div class="section-head"><h2>Enhance</h2></div>
+      <div class="grid-3" style="margin-bottom:12px">
+        <div><label>源图片</label><input type="file" id="enhanceImage" accept="image/png,image/jpeg,image/webp" /></div>
+        <div><label>倍率</label><select id="enhanceScale"></select></div>
+        <div><label>Seed（留空随机）</label><input type="number" id="enhanceSeed" min="0" max="999999999" /></div>
+      </div>
+      <div class="grid-3" style="margin-bottom:12px">
+        <div><label>Strength</label><input type="number" id="enhanceStrength" min="0.01" max="0.99" step="0.01" value="0.5" /></div>
+        <div><label>Noise</label><input type="number" id="enhanceNoise" min="0" max="0.99" step="0.01" value="0" /></div>
+      </div>
+      <div class="toolbar"><button class="btn-primary" id="enhanceBtn" disabled>Enhance</button><span id="enhanceStatus" class="status-text"></span></div>
     </div>
     <div class="panel">
       <div class="section-head"><h2>结果预览</h2></div>
@@ -235,7 +258,7 @@ select option { background: var(--panel); }
           <option value="k_dpmpp_sde">k_dpmpp_sde</option>
           <option value="ddim">ddim</option>
         </select></div>
-        <div><label>噪声调度</label><select id="cfgNoiseSchedule">
+        <div id="cfgNoiseScheduleField"><label>噪声调度</label><select id="cfgNoiseSchedule">
           <option value="karras">karras</option><option value="native">native</option>
           <option value="exponential">exponential</option><option value="polyexponential">polyexponential</option>
         </select></div>
@@ -312,6 +335,7 @@ select option { background: var(--panel); }
     <div class="panel">
       <div class="section-head"><h2>自定义提示词指引</h2></div>
       <textarea id="cfgCustomInstructions" style="min-height:80px" placeholder="写任何你想让模型在画图时遵循的规则或偏好..."></textarea>
+      <label class="toggle" style="margin-top:12px"><input type="checkbox" id="cfgEnhanceActionEnabled" /> 启用 Enhance Action</label>
     </div>
 
     <div class="toolbar">
@@ -435,8 +459,12 @@ document.getElementById('genBtn').addEventListener('click', async function() {
     if (scaleVal) body.scale = parseFloat(scaleVal);
     var rescaleVal = document.getElementById('genRescale').value.trim();
     if (rescaleVal) body.cfg_rescale = parseFloat(rescaleVal);
+    var seedVal = document.getElementById('genSeed').value.trim();
+    if (seedVal) body.seed = parseInt(seedVal);
+    body.count = parseInt(document.getElementById('genCount').value);
     var r = await api('/api/generate', { method:'POST', body: JSON.stringify(body) });
-    document.getElementById('genPreview').innerHTML = '\x3cimg class="preview-img" src="' + r.imageDataUrl + '" alt="preview" /\x3e';
+    var images = r.imageDataUrls || (r.imageDataUrl ? [r.imageDataUrl] : []);
+    document.getElementById('genPreview').innerHTML = '\x3cdiv class="preview-grid"\x3e' + images.map(function(src) { return '\x3cimg class="preview-img" src="' + src + '" alt="preview" /\x3e'; }).join('') + '\x3c/div\x3e';
     var scaleText = r.actualScale !== undefined ? r.actualScale : '-';
     var rescaleText = r.actualCfgRescale !== undefined ? r.actualCfgRescale : '-';
     var resText = r.actualResolution || '-';
@@ -448,6 +476,78 @@ document.getElementById('genBtn').addEventListener('click', async function() {
     document.getElementById('genStatus').textContent = '\u274c 失败';
   }
   btn.disabled = false;
+});
+
+var enhanceImageData = '';
+var enhanceImageSize = null;
+document.getElementById('enhanceImage').addEventListener('change', function(event) {
+  var file = event.target.files && event.target.files[0];
+  enhanceImageData = '';
+  enhanceImageSize = null;
+  if (!file) { updateEnhanceScales(); return; }
+  var reader = new FileReader();
+  reader.onload = function() {
+    enhanceImageData = String(reader.result || '');
+    var image = new Image();
+    image.onload = function() {
+      enhanceImageSize = {width:image.naturalWidth, height:image.naturalHeight};
+      updateEnhanceScales();
+    };
+    image.src = enhanceImageData;
+  };
+  reader.readAsDataURL(file);
+});
+
+function currentCapability(model) {
+  var source = cfgData || genCfgData;
+  var generation = (source && source.generation) || {};
+  return (generation.modelCapabilities || {})[model] || null;
+}
+
+function updateEnhanceScales() {
+  var capability = currentCapability(document.getElementById('genModel').value);
+  var select = document.getElementById('enhanceScale');
+  var scales = [];
+  if (capability && capability.supportsEnhance && enhanceImageSize) {
+    var area = enhanceImageSize.width * enhanceImageSize.height;
+    [1, 1.5, 2].forEach(function(factor) {
+      if (area * factor * factor <= 3145728) scales.push(factor + 'x');
+    });
+    if (capability.supportsMaxEnhance && area < 2516582.4) scales.push('Max');
+  }
+  select.innerHTML = scales.map(function(value) {
+    return '<option value="' + value + '">' + value + '</option>';
+  }).join('');
+  document.getElementById('enhanceBtn').disabled = scales.length === 0;
+}
+
+document.getElementById('genModel').addEventListener('change', updateEnhanceScales);
+document.getElementById('enhanceBtn').addEventListener('click', async function() {
+  if (!enhanceImageData) {
+    document.getElementById('enhanceStatus').textContent = '请选择源图片';
+    return;
+  }
+  var button = this;
+  button.disabled = true;
+  document.getElementById('enhanceStatus').textContent = '正在增强图片…';
+  try {
+    var body = {
+      image: enhanceImageData,
+      prompt: document.getElementById('genPrompt').value.trim() || 'best quality',
+      enhance_scale: document.getElementById('enhanceScale').value,
+      strength: parseFloat(document.getElementById('enhanceStrength').value),
+      noise: parseFloat(document.getElementById('enhanceNoise').value),
+      model: document.getElementById('genModel').value,
+    };
+    var seed = document.getElementById('enhanceSeed').value.trim();
+    if (seed) body.seed = parseInt(seed);
+    var result = await api('/api/enhance', {method:'POST', body:JSON.stringify(body)});
+    document.getElementById('genPreview').innerHTML = '<img class="preview-img" src="' + result.imageDataUrl + '" alt="enhanced preview" />';
+    document.getElementById('enhanceStatus').textContent = '增强完成';
+  } catch (error) {
+    document.getElementById('enhanceStatus').textContent = '失败: ' + error.message;
+  }
+  updateEnhanceScales();
 });
 
 // ════ 配置编辑 ════
@@ -471,6 +571,7 @@ function fillConfigForm(d) {
   document.getElementById('cfgModelAliases').value = Object.entries(g.modelAliases || {}).map(function(pair) { return pair[0] + '=' + pair[1]; }).join(', ');
   document.getElementById('cfgSampler').value = g.sampler || '';
   document.getElementById('cfgNoiseSchedule').value = g.noiseSchedule || 'karras';
+  updateNoiseScheduleVisibility();
   document.getElementById('cfgResolution').value = g.resolution || '832x1216';
   document.getElementById('cfgSteps').value = g.steps || 28;
   document.getElementById('cfgScale').value = g.scale || 5.0;
@@ -481,6 +582,7 @@ function fillConfigForm(d) {
   document.getElementById('cfgCharacterPrompt').value = g.characterPrompt || '';
   document.getElementById('cfgNegativePrompt').value = g.negativePrompt || '';
   document.getElementById('cfgCustomInstructions').value = (d.prompt && d.prompt.customInstructions) || '';
+  document.getElementById('cfgEnhanceActionEnabled').checked = Boolean(d.components && d.components.enhanceActionEnabled);
 
   const v = d.vibe || {};
   document.getElementById('cfgVibeAlwaysEnabled').checked = v.alwaysEnabled || false;
@@ -490,6 +592,34 @@ function fillConfigForm(d) {
   document.getElementById('cfgDrEnabled').checked = dr.enabled || false;
   document.getElementById('cfgDrSelectableEnabled').checked = dr.selectableEnabled || false;
 }
+
+function updateNoiseScheduleVisibility() {
+  const field = document.getElementById('cfgNoiseScheduleField');
+  const model = document.getElementById('cfgModel').value;
+  const capability = currentCapability(model);
+  const samplerSelect = document.getElementById('cfgSampler');
+  const previousSampler = samplerSelect.value;
+  if (!capability) { field.hidden = true; return; }
+  const samplers = capability.samplers || [];
+  samplerSelect.innerHTML = samplers.map(function(value) {
+    return '<option value="' + value + '">' + value + '</option>';
+  }).join('');
+  if (samplers.includes(previousSampler)) samplerSelect.value = previousSampler;
+  const sampler = samplerSelect.value;
+  const schedules = capability.fixedNoiseSchedule
+    ? [capability.fixedNoiseSchedule]
+    : ((capability.noiseSchedulesBySampler || {})[sampler] || []);
+  const scheduleSelect = document.getElementById('cfgNoiseSchedule');
+  const previousSchedule = scheduleSelect.value;
+  scheduleSelect.innerHTML = schedules.map(function(value) {
+    return '<option value="' + value + '">' + value + '</option>';
+  }).join('');
+  if (schedules.includes(previousSchedule)) scheduleSelect.value = previousSchedule;
+  field.hidden = schedules.length === 0 || Boolean(capability.fixedNoiseSchedule);
+}
+
+document.getElementById('cfgModel').addEventListener('change', updateNoiseScheduleVisibility);
+document.getElementById('cfgSampler').addEventListener('change', updateNoiseScheduleVisibility);
 
 function renderConfigLists(d) {
   // 预设
@@ -640,6 +770,7 @@ function collectConfig() {
   return {
     generation: g,
     prompt: { customInstructions: v('cfgCustomInstructions'), presets },
+    components: { enhanceActionEnabled: document.getElementById('cfgEnhanceActionEnabled').checked },
     vibe: { alwaysEnabled: document.getElementById('cfgVibeAlwaysEnabled').checked, selectableEnabled: document.getElementById('cfgVibeSelectableEnabled').checked, always, selectable },
     directorReference: { enabled: document.getElementById('cfgDrEnabled').checked, selectableEnabled: document.getElementById('cfgDrSelectableEnabled').checked, selectable: drs },
   };

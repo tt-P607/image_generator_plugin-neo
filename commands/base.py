@@ -129,7 +129,7 @@ class BaseImageCommand(BaseCommand):
 
     async def run_generation(
         self,
-        work: Callable[[], Awaitable[ImageResult]],
+        work: Callable[[], Awaitable[ImageResult | tuple[ImageResult, ...]]],
         *,
         task_name: str,
         purpose: str,
@@ -165,30 +165,31 @@ class BaseImageCommand(BaseCommand):
                 )
                 return
 
-            if not result.success or result.path is None:
-                await send_text(
-                    replies.pick(replies.GENERATE_ERROR_HINTS, "gen_error").format(
-                        error=replies.humanize_error(result.message)
-                    ),
-                    stream_id=stream_id,
-                )
-                return
-
-            try:
-                image_b64 = storage.read_image_base64(
-                    Path(result.path),
-                    strip_metadata=strip_metadata,
-                )
-            except (OSError, ValueError) as error:
-                await send_text(
-                    replies.pick(replies.ERROR_HINTS, "error").format(
-                        error=replies.humanize_error(str(error))
-                    ),
-                    stream_id=stream_id,
-                )
-                return
-
-            await send_image(image_b64, stream_id=stream_id, reply_to=reply_to)
+            results = result if isinstance(result, tuple) else (result,)
+            for image_result in results:
+                if not image_result.success or image_result.path is None:
+                    await send_text(
+                        replies.pick(
+                            replies.GENERATE_ERROR_HINTS,
+                            "gen_error",
+                        ).format(error=replies.humanize_error(image_result.message)),
+                        stream_id=stream_id,
+                    )
+                    return
+                try:
+                    image_b64 = storage.read_image_base64(
+                        Path(image_result.path),
+                        strip_metadata=strip_metadata,
+                    )
+                except (OSError, ValueError) as error:
+                    await send_text(
+                        replies.pick(replies.ERROR_HINTS, "error").format(
+                            error=replies.humanize_error(str(error))
+                        ),
+                        stream_id=stream_id,
+                    )
+                    return
+                await send_image(image_b64, stream_id=stream_id, reply_to=reply_to)
             await send_text(
                 replies.pick(success_hints, success_key),
                 stream_id=stream_id,

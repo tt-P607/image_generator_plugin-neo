@@ -13,6 +13,7 @@ from src.app.plugin_system.base import BasePlugin, BaseService
 
 from ..engine import (
     DirectorToolSpec,
+    EnhanceSpec,
     GenerationSpec,
     ImageEngine,
     ImageResult,
@@ -69,6 +70,26 @@ class ImageGeneratorService(BaseService):
             return ImageResult.failure(ENGINE_UNAVAILABLE)
         return await engine.generate(spec)
 
+    async def generate_images(
+        self,
+        spec: GenerationSpec,
+        count: int,
+    ) -> tuple[ImageResult, ...]:
+        """以单图 wire 串行生成 1 到 4 张图片。"""
+
+        engine = self.engine
+        if engine is None:
+            return (ImageResult.failure(ENGINE_UNAVAILABLE),)
+        return await engine.generate_many(spec, count)
+
+    async def enhance_image(self, spec: EnhanceSpec) -> ImageResult:
+        """执行普通或 Max Enhance。"""
+
+        engine = self.engine
+        if engine is None:
+            return ImageResult.failure(ENGINE_UNAVAILABLE)
+        return await engine.enhance(spec)
+
     async def inpaint_image(self, spec: InpaintSpec) -> ImageResult:
         """执行局部重绘。
 
@@ -103,7 +124,7 @@ class ImageGeneratorService(BaseService):
         *,
         from_command: bool = False,
     ) -> ImageResult:
-        """执行 4x 图片放大。
+        """执行固定 2× 图片放大。
 
         Args:
             image_b64: 源图 base64

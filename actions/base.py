@@ -159,7 +159,7 @@ class BaseImageAction(BaseAction):
 
     async def run_in_background(
         self,
-        work: Callable[[], Awaitable[ImageResult]],
+        work: Callable[[], Awaitable[ImageResult | tuple[ImageResult, ...]]],
         *,
         task_name: str,
         purpose: str,
@@ -186,25 +186,34 @@ class BaseImageAction(BaseAction):
 
         async def _execute() -> tuple[bool, str]:
             result = await work()
-            if not result.success or result.path is None:
-                logger.error(f"{error_prefix}: {result.message}")
-                message = f"{error_prefix}: {result.message}"
-                if detached["value"]:
-                    await send_text(message, stream_id=self.chat_stream.stream_id)
-                return False, message
+            results = result if isinstance(result, tuple) else (result,)
+            output_paths: list[Path] = []
+            for index, image_result in enumerate(results, start=1):
+                if not image_result.success or image_result.path is None:
+                    logger.error(f"{error_prefix}: {image_result.message}")
+                    message = f"{error_prefix}: {image_result.message}"
+                    if detached["value"]:
+                        await send_text(message, stream_id=self.chat_stream.stream_id)
+                    return False, message
 
-            path = Path(result.path)
-            stem = sanitize_filename_stem(output_filename)
-            if stem:
-                path = storage.rename_with_stem(path, stem)
+                path = Path(image_result.path)
+                stem = sanitize_filename_stem(output_filename)
+                if stem:
+                    numbered_stem = stem if len(results) == 1 else f"{stem}_{index}"
+                    path = storage.rename_with_stem(path, numbered_stem)
 
-            sent, send_message = await self._send_image(path)
-            if not sent:
-                if detached["value"]:
-                    await send_text(send_message, stream_id=self.chat_stream.stream_id)
-                return False, send_message
+                sent, send_message = await self._send_image(path)
+                if not sent:
+                    if detached["value"]:
+                        await send_text(
+                            send_message,
+                            stream_id=self.chat_stream.stream_id,
+                        )
+                    return False, send_message
+                output_paths.append(path)
 
-            return True, f"{success_message}（文件名: {path.name}）"
+            filenames = ", ".join(path.name for path in output_paths)
+            return True, f"{success_message}（文件名: {filenames}）"
 
         try:
             return await background.run_shielded(

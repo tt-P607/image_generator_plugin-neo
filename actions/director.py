@@ -24,7 +24,6 @@ IMAGE_SOURCE_HINT = (
     "  - 处理 Bot 自己生成的图片：填写 image_filename 参数"
 )
 FREE_TIER_HINT = "标准尺寸（≤1024×1024）内免费。"
-FALLBACK_IMAGE_SIZE = (1024, 1024)
 
 
 class BaseDirectorAction(BaseImageAction):
@@ -90,9 +89,15 @@ class BaseDirectorAction(BaseImageAction):
             await self.notify(hint)
             return False, hint
 
-        width, height = image_ops.read_image_size(image_b64)
-        if not width or not height:
-            width, height = FALLBACK_IMAGE_SIZE
+        try:
+            clean_image, width, height = image_ops.validate_image_data(
+                image_b64,
+                field="source_image",
+            )
+        except ValueError as error:
+            return False, f"源图片无效：{error}"
+        if not 0 <= defry <= 5:
+            return False, f"defry 必须在 0~5 之间（当前为 {defry!r}）"
 
         logger.info(
             f"导演工具请求: {self.tool_type} ({self.tool_display})"
@@ -101,11 +106,11 @@ class BaseDirectorAction(BaseImageAction):
 
         spec = DirectorToolSpec(
             tool_type=self.tool_type,
-            source_image=image_ops.strip_data_url_prefix(image_b64),
+            source_image=clean_image,
             width=width,
             height=height,
             prompt=prompt.strip() or None,
-            defry=defry or None,
+            defry=defry,
         )
 
         async def _work() -> ImageResult:

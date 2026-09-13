@@ -2,6 +2,7 @@
 
 from .base import BaseImageCommand
 from .draw import ImageEditCommand, ImageGeneratorCommand, ImageReferenceCommand
+from .upscale import ImageUpscaleCommand
 from .vibe import VibeManagementCommand
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "ImageEditCommand",
     "ImageGeneratorCommand",
     "ImageReferenceCommand",
+    "ImageUpscaleCommand",
     "VibeManagementCommand",
 ]

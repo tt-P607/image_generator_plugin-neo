@@ -16,7 +16,8 @@ from ..config import (
     PromptPresetConfig,
     VibeItemConfig,
 )
-from ..engine import GenerationSpec, ImageEngine
+from ..engine import EnhanceScale, EnhanceSpec, GenerationSpec, ImageEngine
+from ..engine.settings import EngineSettings
 from .persistence import save_config_atomically
 
 DEFAULT_CONFIG_PATH = Path("config/plugins/image_generator_plugin-neo/config.toml")
@@ -49,6 +50,11 @@ def config_to_payload(
     Returns:
         前端编辑载荷
     """
+    settings = EngineSettings.from_config(config)
+    capabilities = {
+        model: _model_capability_payload(settings, model)
+        for model in settings.allowed_models
+    }
     return {
         "configPath": str(Path(config_path)),
         "plugin": {"enabled": config.plugin.enabled},
@@ -76,6 +82,7 @@ def config_to_payload(
             "characterPrompt": config.generation.character_prompt,
             "alwaysUseCoords": config.generation.always_use_coords,
             "allowSkipStyle": config.generation.allow_skip_style,
+            "modelCapabilities": capabilities,
         },
         "vibe": {
             "alwaysEnabled": config.vibe.always_enabled,
@@ -102,10 +109,36 @@ def config_to_payload(
                 for preset in config.prompt.presets
             ],
         },
+        "components": {
+            "enhanceActionEnabled": config.components.enhance_action_enabled,
+        },
         "webui": {
             "enabled": config.webui.enabled,
             "routePath": config.webui.route_path,
         },
+    }
+
+
+def _model_capability_payload(
+    settings: EngineSettings,
+    model: str,
+) -> dict[str, Any]:
+    """把集中模型能力转换为前端只读 DTO。"""
+
+    profile = settings.model_profile(model)
+    return {
+        "family": profile.family,
+        "samplers": list(profile.supported_samplers),
+        "noiseSchedulesBySampler": {
+            sampler: sorted(profile.allowed_noise_schedules(sampler))
+            for sampler in profile.supported_samplers
+        },
+        "fixedNoiseSchedule": "karras" if profile.is_v5 else None,
+        "supportsVibe": profile.supports_vibe,
+        "supportsDirectorReference": profile.supports_director_reference,
+        "supportsEnhance": profile.supports_enhance_prompt_add,
+        "supportsMaxEnhance": profile.supports_max_enhance,
+        "maxCharacters": profile.max_characters,
     }
 
 
@@ -227,6 +260,12 @@ def apply_overrides(
             reference["selectable"]
         )
 
+    components = overrides.get("components", {})
+    if "enhanceActionEnabled" in components:
+        config.components.enhance_action_enabled = bool(
+            components["enhanceActionEnabled"]
+        )
+
     webui = overrides.get("webui", {})
     if "enabled" in webui:
         config.webui.enabled = bool(webui["enabled"])
@@ -325,8 +364,10 @@ async def generate_preview(
     variety_plus: bool | None = None,
     render_text: bool = False,
     selected_vibes: list[str] | None = None,
+    seed: int | None = None,
+    count: int = 1,
 ) -> dict[str, Any]:
-    """走生图队列出一张预览图。
+    """走生图队列串行生成一到四张预览图。
 
     Args:
         engine: 图片生成引擎
@@ -351,7 +392,7 @@ async def generate_preview(
     actual_model = model.strip() or settings.model
     actual_steps = steps if steps is not None else settings.steps
 
-    result = await engine.generate(
+    results = await engine.generate_many(
         GenerationSpec(
             prompt=prompt,
             user_id="webui_preview",
@@ -365,11 +406,14 @@ async def generate_preview(
             variety_plus=variety_plus,
             render_text=render_text,
             selected_vibe_names=tuple(selected_vibes or ()),
-        )
+            seed=seed,
+        ),
+        count,
     )
 
     payload: dict[str, Any] = {
         "imageDataUrl": None,
+        "imageDataUrls": [],
         "prompt": prompt,
         "actualModel": actual_model,
         "actualSteps": actual_steps,
@@ -378,15 +422,55 @@ async def generate_preview(
         "actualResolution": f"{width}x{height}",
     }
 
-    if not result.success or result.path is None:
-        payload["error"] = result.message
+    failed = next((result for result in results if not result.success), None)
+    if failed is not None:
+        payload["error"] = failed.message
         return payload
 
+    image_data_urls: list[str] = []
+    for result in results:
+        if result.path is None:
+            continue
+        image_file = Path(result.path)
+        if image_file.stat().st_size > PREVIEW_MAX_BYTES:
+            payload["error"] = "预览图片超过 32 MB 限制"
+            return payload
+        encoded = base64.b64encode(image_file.read_bytes()).decode()
+        image_data_urls.append(f"data:image/png;base64,{encoded}")
+    payload["imageDataUrls"] = image_data_urls
+    payload["imageDataUrl"] = image_data_urls[0] if image_data_urls else None
+    return payload
+
+
+async def enhance_preview(
+    *,
+    engine: ImageEngine,
+    image: str,
+    prompt: str,
+    enhance_scale: EnhanceScale,
+    strength: float,
+    noise: float,
+    model: str = "",
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """执行一次 WebUI Enhance 并返回 data URL。"""
+
+    result = await engine.enhance(
+        EnhanceSpec(
+            prompt=prompt,
+            user_id="webui_preview",
+            source_image=image,
+            scale=enhance_scale,
+            strength=strength,
+            noise=noise,
+            model=model.strip() or None,
+            seed=seed,
+        )
+    )
+    if not result.success or result.path is None:
+        return {"imageDataUrl": None, "error": result.message}
     image_file = Path(result.path)
     if image_file.stat().st_size > PREVIEW_MAX_BYTES:
-        payload["error"] = "预览图片超过 32 MB 限制"
-        return payload
-
+        return {"imageDataUrl": None, "error": "预览图片超过 32 MB 限制"}
     encoded = base64.b64encode(image_file.read_bytes()).decode()
-    payload["imageDataUrl"] = f"data:image/png;base64,{encoded}"
-    return payload
+    return {"imageDataUrl": f"data:image/png;base64,{encoded}"}

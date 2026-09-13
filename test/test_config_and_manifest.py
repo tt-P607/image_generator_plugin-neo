@@ -42,8 +42,11 @@ def test_manifest_declares_all_components() -> None:
         (item["component_type"], item["component_name"]) for item in manifest["include"]
     }
     assert ("command", "nai_ref") in declared
-    assert sum(kind == "action" for kind, _ in declared) == 9
-    assert sum(kind == "command" for kind, _ in declared) == 4
+    assert ("action", "enhance_image") in declared
+    assert ("action", "upscale_image") in declared
+    assert ("command", "nai_upscale") in declared
+    assert sum(kind == "action" for kind, _ in declared) == 11
+    assert sum(kind == "command" for kind, _ in declared) == 5
     assert sum(kind == "service" for kind, _ in declared) == 1
     assert sum(kind == "router" for kind, _ in declared) == 1
     assert sum(kind == "config" for kind, _ in declared) == 1
@@ -56,6 +59,9 @@ def test_plugin_components_match_manifest() -> None:
     config.plugin.enabled = True
     config.webui.enabled = True
     config.components.director_bg_removal_enabled = True
+    config.components.enhance_action_enabled = True
+    config.components.upscale_action_enabled = True
+    config.components.upscale_command_enabled = True
 
     plugin = ImageGeneratorPlugin(config)
     exposed = {
@@ -67,6 +73,25 @@ def test_plugin_components_match_manifest() -> None:
     declared = {item["component_name"] for item in load_manifest()["include"]}
     assert declared - {"config"} == exposed
     assert ImageGeneratorConfig in plugin.configs
+
+
+def test_extra_image_components_are_disabled_by_default() -> None:
+    """验证新增 Enhance 与固定 2× 入口默认不注册。"""
+
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+
+    assert config.components.enhance_action_enabled is False
+    assert config.components.upscale_action_enabled is False
+    assert config.components.upscale_command_enabled is False
+
+    exposed = {
+        getattr(component, "name", "")
+        for component in ImageGeneratorPlugin(config).get_components()
+    }
+    assert "enhance_image" not in exposed
+    assert "upscale_image" not in exposed
+    assert "nai_upscale" not in exposed
 
 
 def test_disabled_plugin_exposes_no_components() -> None:
@@ -86,11 +111,11 @@ def test_config_rejects_invalid_values() -> None:
 
 
 def test_config_enforces_generation_model_whitelist() -> None:
-    """验证模型白名单只接受 V4.5/V5 生图模型且必须包含默认模型。"""
+    """验证模型白名单只接受能力档案中的生图模型且必须包含默认模型。"""
 
     raw = ImageGeneratorConfig().model_dump(mode="python")
     raw["generation"]["model"] = "nai-diffusion-future"
-    with pytest.raises(ValidationError, match="仅支持 V4.5/V5 生图模型"):
+    with pytest.raises(ValidationError, match="仅支持受能力档案认可的官方生图模型"):
         ImageGeneratorConfig.model_validate(raw)
 
     raw = ImageGeneratorConfig().model_dump(mode="python")
@@ -103,7 +128,7 @@ def test_config_enforces_generation_model_whitelist() -> None:
         "nai-diffusion-5-curated",
         "nai-diffusion-5-full-inpainting",
     ]
-    with pytest.raises(ValidationError, match="仅支持 V4.5/V5 生图模型"):
+    with pytest.raises(ValidationError, match="仅支持受能力档案认可的官方生图模型"):
         ImageGeneratorConfig.model_validate(raw)
 
     raw = ImageGeneratorConfig().model_dump(mode="python")

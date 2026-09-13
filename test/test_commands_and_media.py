@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import cast, get_type_hints
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from PIL import Image, PngImagePlugin
 
 from image_generator_plugin_neo.commands import parsing
 from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
 from image_generator_plugin_neo.actions.draw import DrawAction
 from image_generator_plugin_neo.descriptions import build_draw_description
-from image_generator_plugin_neo.engine import storage
+from image_generator_plugin_neo.engine import assets, storage
 from image_generator_plugin_neo.media import extract_image_by_media_id, image_ops
 
 
@@ -42,13 +43,23 @@ def test_extract_generation_flags_removes_only_explicit_options() -> None:
 
     flags = parsing.extract_generation_flags(
         '1girl, holding sign "Hello" --model nai-diffusion-5-full '
-        "--steps 24 --variety-plus true --render-text"
+        "--steps 24 --seed 0 --count 3 --variety-plus true --render-text"
     )
     assert flags.model == "nai-diffusion-5-full"
     assert flags.steps == 24
+    assert flags.seed == 0
+    assert flags.count == 3
     assert flags.variety_plus is True
     assert flags.render_text is True
     assert flags.remainder == '1girl, holding sign "Hello"'
+
+
+@pytest.mark.parametrize("flag", ["--seed -1", "--count 0", "--count 5"])
+def test_extract_generation_flags_rejects_invalid_seed_or_count(flag: str) -> None:
+    """验证命令明确拒绝非法 seed 与图片数量。"""
+
+    with pytest.raises(ValueError):
+        parsing.extract_generation_flags(f"1girl {flag}")
 
 
 def test_split_prompt_supports_fullwidth_colon() -> None:
@@ -66,24 +77,22 @@ def test_parse_size_token_handles_aliases_and_literals() -> None:
     assert parsing.parse_size_token("1girl") is None
 
 
-def test_parse_edit_args_extracts_strength_only_in_range() -> None:
-    """验证只有落在合法区间的数字才会被视作重绘强度。"""
+def test_parse_edit_args_rejects_strength_outside_range() -> None:
+    """验证位置强度参数超出范围时明确报错。"""
 
     assert parsing.parse_edit_args(["1girl", "0.5"]) == ("1girl", 0.5)
-    assert parsing.parse_edit_args(["1girl", "5"]) == ("1girl 5", None)
+    with pytest.raises(ValueError, match="strength"):
+        parsing.parse_edit_args(["1girl", "5"])
     assert parsing.parse_edit_args([]) == (parsing.DEFAULT_EDIT_PROMPT, None)
 
 
-def test_extract_reference_flags_clamps_values() -> None:
-    """验证参考参数会被夹紧到 0~1 且支持中文别名。"""
+def test_extract_reference_flags_rejects_values_outside_range() -> None:
+    """验证参考参数拒绝范围外数值。"""
 
-    flags = parsing.extract_reference_flags(
-        "1girl --参考类型 风格 --fidelity 2.0 --strength -1"
-    )
-    assert flags.ref_type == "style"
-    assert flags.fidelity == 1.0
-    assert flags.strength == 0.0
-    assert flags.remainder == "1girl"
+    with pytest.raises(ValueError, match="fidelity"):
+        parsing.extract_reference_flags(
+            "1girl --参考类型 风格 --fidelity 2.0 --strength -1"
+        )
 
 
 def test_strip_metadata_clears_alpha_lsb_and_removes_text(tmp_path: Path) -> None:
@@ -134,12 +143,50 @@ def test_downscale_aligns_unaligned_image_under_limit() -> None:
     assert width * height <= image_ops.FREE_TIER_MAX_PIXELS
 
 
-def test_director_reference_is_padded_to_required_size() -> None:
-    """验证精密参考图会被填充到 API 要求的 1024x1536。"""
+@pytest.mark.parametrize(
+    ("source_size", "expected_size"),
+    [
+        ((400, 800), (1024, 1536)),
+        ((800, 400), (1536, 1024)),
+        ((600, 600), (1472, 1472)),
+    ],
+)
+def test_director_reference_uses_nearest_official_canvas(
+    source_size: tuple[int, int],
+    expected_size: tuple[int, int],
+) -> None:
+    """验证精密参考图按源比例选择官网 Q68 大画幅。"""
 
-    encoded = encode_png(Image.new("RGB", (800, 400), (255, 255, 255)))
+    encoded = encode_png(Image.new("RGB", source_size, (255, 255, 255)))
     fitted = image_ops.fit_for_director_reference(encoded)
-    assert image_ops.read_image_size(fitted) == image_ops.DIRECTOR_REF_SIZE
+    assert image_ops.read_image_size(fitted) == expected_size
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "data:image/png;base64,not-base64!",
+        "data:text/plain;base64,SGVsbG8=",
+        base64.b64encode(b"not an image").decode("ascii"),
+    ],
+)
+def test_validate_image_data_rejects_invalid_inputs(invalid: str) -> None:
+    """损坏 data URL、错误 MIME 和非图片 Base64 不得被接受。"""
+
+    with pytest.raises(ValueError):
+        image_ops.validate_image_data(invalid)
+
+
+def test_preencoded_vibe_rejects_damaged_encoding(tmp_path: Path) -> None:
+    """验证损坏的导出向量不会退化为普通图片或继续发送。"""
+
+    vibe_file = tmp_path / "damaged.naiv4vibe"
+    vibe_file.write_text(
+        '{"encodings":{"v4-5full":{"0":{"encoding":"not-base64!"}}}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="vibe_encoding"):
+        assets.read_preencoded_vector(vibe_file, "nai-diffusion-4-5-full")
 
 
 def test_rect_mask_marks_only_selected_region() -> None:
@@ -245,7 +292,7 @@ def test_draw_description_detects_and_injects_v5_model() -> None:
     assert "1.3~1.8" in desc
     assert "transparent background" in desc
     assert "visual novel sprite" in desc
-    assert "版权角色硬上限 22" in desc
+    assert "V5 角色硬上限 32" in desc
     assert "最佳写法是混合提示词" in desc
     assert "完整英语自然语言句子" in desc
     assert "V5 不要求 V4.5 的 5×5 网格" in desc

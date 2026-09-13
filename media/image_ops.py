@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import io
+import re
 import zipfile
 from pathlib import Path
 
@@ -16,9 +18,19 @@ from src.app.plugin_system.api.log_api import get_logger
 
 logger = get_logger("image_generator_plugin.image_ops")
 
-DIRECTOR_REF_SIZE = (1024, 1536)
+DIRECTOR_REF_SIZES = ((1024, 1536), (1536, 1024), (1472, 1472))
+VIBE_REF_SIZE = (448, 448)
 FREE_TIER_MAX_PIXELS = 1_048_576
 SIZE_ALIGNMENT = 64
+_DATA_URL_PATTERN = re.compile(
+    r"^data:(image/(?:png|jpeg|jpg|webp));base64,([A-Za-z0-9+/]*={0,2})$",
+    re.IGNORECASE,
+)
+_IMAGE_FORMAT_MIMES: dict[str, frozenset[str]] = {
+    "PNG": frozenset({"image/png"}),
+    "JPEG": frozenset({"image/jpeg", "image/jpg"}),
+    "WEBP": frozenset({"image/webp"}),
+}
 
 
 def strip_data_url_prefix(b64_data: str) -> str:
@@ -30,9 +42,69 @@ def strip_data_url_prefix(b64_data: str) -> str:
     Returns:
         纯 base64 字符串
     """
-    if b64_data.startswith("data:"):
-        return b64_data.split(",", 1)[-1]
-    return b64_data
+    cleaned = b64_data.strip()
+    if not cleaned.lower().startswith("data:"):
+        return cleaned
+    match = _DATA_URL_PATTERN.fullmatch(cleaned)
+    if match is None:
+        raise ValueError("图片 data URL 必须使用 image/png、image/jpeg 或 image/webp 的 base64 格式")
+    return match.group(2)
+
+
+def decode_base64_blob(value: str, *, field: str) -> bytes:
+    """严格解码非空 Base64 数据。"""
+
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"字段 {field} 不能为空")
+    try:
+        decoded = base64.b64decode(cleaned, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(f"字段 {field} 不是合法 Base64") from error
+    if not decoded:
+        raise ValueError(f"字段 {field} 解码后为空")
+    return decoded
+
+
+def validate_image_data(
+    b64_data: str,
+    *,
+    field: str = "image",
+) -> tuple[str, int, int]:
+    """严格校验图片并返回裸 Base64 与尺寸。"""
+
+    cleaned_input = b64_data.strip()
+    declared_mime: str | None = None
+    if cleaned_input.lower().startswith("data:"):
+        match = _DATA_URL_PATTERN.fullmatch(cleaned_input)
+        if match is None:
+            raise ValueError(
+                f"字段 {field} 的 data URL 必须使用 image/png、image/jpeg 或 image/webp 的 base64 格式"
+            )
+        declared_mime = match.group(1).lower()
+        clean = match.group(2)
+    else:
+        clean = cleaned_input
+
+    raw = decode_base64_blob(clean, field=field)
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image_format = image.format
+            width, height = image.size
+            image.verify()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"字段 {field} 不是有效图片") from error
+
+    allowed_mimes = _IMAGE_FORMAT_MIMES.get(image_format or "")
+    if allowed_mimes is None:
+        raise ValueError(f"字段 {field} 仅支持 PNG、JPEG 或 WebP 图片")
+    if declared_mime is not None and declared_mime not in allowed_mimes:
+        raise ValueError(
+            f"字段 {field} 的 MIME {declared_mime!r} 与实际 {image_format} 格式不一致"
+        )
+    if width <= 0 or height <= 0:
+        raise ValueError(f"字段 {field} 的图片尺寸无效")
+    return clean, width, height
 
 
 def encode_file(path: Path) -> str:
@@ -54,15 +126,13 @@ def read_image_size(b64_data: str) -> tuple[int, int]:
         b64_data: 图片 base64
 
     Returns:
-        (宽, 高)，解析失败时返回 (0, 0)
+        (宽, 高)
+
+    Raises:
+        ValueError: 数据不是有效图片
     """
-    try:
-        raw = base64.b64decode(strip_data_url_prefix(b64_data))
-        with Image.open(io.BytesIO(raw)) as image:
-            return image.size
-    except (OSError, ValueError) as error:
-        logger.warning(f"读取图片尺寸失败: {error}")
-        return 0, 0
+    _, width, height = validate_image_data(b64_data)
+    return width, height
 
 
 def strip_png_metadata(image_bytes: bytes) -> bytes:
@@ -123,8 +193,8 @@ def downscale_to_free_tier(
     Returns:
         (缩放后 base64, 宽, 高)；无需处理时原样返回
     """
-    clean = strip_data_url_prefix(b64_data)
-    raw = base64.b64decode(clean)
+    clean, _, _ = validate_image_data(b64_data)
+    raw = decode_base64_blob(clean, field="image")
     with Image.open(io.BytesIO(raw)) as image:
         width, height = image.size
         if (
@@ -156,7 +226,7 @@ def downscale_to_free_tier(
 
 
 def fit_for_director_reference(b64_data: str) -> str:
-    """将图片缩放并黑边填充到精密参考所需的 1024x1536 PNG。
+    """按源图比例缩放并填充到官网精密参考画布。
 
     Args:
         b64_data: 原始图片 base64
@@ -164,11 +234,18 @@ def fit_for_director_reference(b64_data: str) -> str:
     Returns:
         处理后的 base64
     """
-    raw = base64.b64decode(strip_data_url_prefix(b64_data))
+    clean, source_width, source_height = validate_image_data(
+        b64_data,
+        field="character_reference",
+    )
+    raw = decode_base64_blob(clean, field="character_reference")
     with Image.open(io.BytesIO(raw)) as source:
         image = source.convert("RGB")
-        target_width, target_height = DIRECTOR_REF_SIZE
-        source_ratio = image.width / image.height
+        source_ratio = source_width / source_height
+        target_width, target_height = min(
+            DIRECTOR_REF_SIZES,
+            key=lambda size: abs(size[0] / size[1] - source_ratio),
+        )
         target_ratio = target_width / target_height
 
         if source_ratio > target_ratio:
@@ -179,7 +256,7 @@ def fit_for_director_reference(b64_data: str) -> str:
             new_width = int(target_height * source_ratio)
 
         resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGB", DIRECTOR_REF_SIZE, (0, 0, 0))
+        canvas = Image.new("RGB", (target_width, target_height), (0, 0, 0))
         canvas.paste(
             resized,
             ((target_width - new_width) // 2, (target_height - new_height) // 2),
@@ -187,6 +264,24 @@ def fit_for_director_reference(b64_data: str) -> str:
         buffer = io.BytesIO()
         canvas.save(buffer, format="PNG")
 
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def fit_for_vibe_reference(b64_data: str) -> str:
+    """将 Vibe 原图 contain 到官网 448×448 黑底 PNG。"""
+
+    clean, _, _ = validate_image_data(b64_data, field="vibe_image")
+    raw = decode_base64_blob(clean, field="vibe_image")
+    with Image.open(io.BytesIO(raw)) as source:
+        image = source.convert("RGB")
+        image.thumbnail(VIBE_REF_SIZE, Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", VIBE_REF_SIZE, (0, 0, 0))
+        canvas.paste(
+            image,
+            ((VIBE_REF_SIZE[0] - image.width) // 2, (VIBE_REF_SIZE[1] - image.height) // 2),
+        )
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
@@ -203,18 +298,6 @@ def _clear_alpha_lsb(value: int) -> int:
         最低位被置 0 后的值
     """
     return value & 0xFE
-
-
-def _invert_alpha(value: int) -> int:
-    """反转 8 位 Alpha 值。
-
-    Args:
-        value: 像素 Alpha 分量
-
-    Returns:
-        按位取反后的值
-    """
-    return 255 - value
 
 
 def build_rect_mask(
@@ -262,28 +345,6 @@ def build_rect_mask(
 
     buffer = io.BytesIO()
     mask.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
-def invert_mask_alpha(b64_data: str) -> str:
-    """按 OpenAI 兼容语义反转蒙版透明度（透明=重绘）。
-
-    插件内部的蒙版约定是白色不透明区域参与重绘；新版 OpenAI 兼容网关要求
-    蒙版透明区域参与重绘、不透明区域保留，转发前需要交换 Alpha 通道。
-
-    Args:
-        b64_data: 蒙版 PNG 的 base64
-
-    Returns:
-        Alpha 反转后的蒙版 PNG base64
-    """
-    raw = base64.b64decode(strip_data_url_prefix(b64_data))
-    with Image.open(io.BytesIO(raw)) as source:
-        red, green, blue, alpha = source.convert("RGBA").split()
-        inverted = alpha.point(_invert_alpha)
-        flipped = Image.merge("RGBA", (red, green, blue, inverted))
-        buffer = io.BytesIO()
-        flipped.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
