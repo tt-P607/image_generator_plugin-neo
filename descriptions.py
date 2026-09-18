@@ -54,6 +54,21 @@ def _model_header_block(config: ImageGeneratorConfig) -> str:
     )
 
 
+def _natural_language_block(config: ImageGeneratorConfig) -> str:
+    """构建中文自然语言直出（自动写词）引导块。"""
+    if not config.prompt_writer.enabled:
+        return ""
+    return (
+        "**0. 中文直出（推荐）**\n"
+        "  - 日常出图优先填 natural_description 参数，直接用中文写画面描述："
+        "画什么人、穿什么、什么动作表情、什么场景光线、什么景别视角与画幅倾向。\n"
+        "  - 系统会用专用写词模型自动翻译成 NovelAI 标签再出图，你无需手写英文标签。\n"
+        "  - 填了 natural_description 就不要再填 content_description；"
+        "只有需要精确控制标签、或多角色 characters 场景时才用 content_description。\n"
+        "  - 自动写词由配置 prompt_writer.enabled 控制，关闭后此能力不可用，届时请自行写标签。"
+    )
+
+
 def _base_structure_block() -> str:
     """构建不绑定模型代际的提示词结构说明。"""
     return (
@@ -366,6 +381,7 @@ def build_draw_description(config: ImageGeneratorConfig) -> str:
     """
     blocks = [
         _model_header_block(config),
+        _natural_language_block(config),
         _model_list_block(config),
         _base_structure_block(),
         _character_naming_block(),

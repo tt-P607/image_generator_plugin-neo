@@ -1,7 +1,11 @@
-"""内置提示词写手 Tool：把自然语言画面描述写成 NovelAI 标签串。
+"""内置提示词写手：把自然语言画面描述写成 NovelAI 标签串。
 
-流程：聊天模型调用本工具 → 本工具用 [prompt_writer] 配置指定的专用模型写词 →
-返回标签串 → 聊天模型把标签原样填进 action-draw_image 的 content_description。
+提供两个入口：
+- write_prompt()：共用的写词函数，image_prompt 工具与 draw_image 动作都会调用。
+- ImagePromptWriterTool：暴露给聊天模型的 image_prompt 工具（只出标签，不出图）。
+
+写词模型由 [prompt_writer] 配置节指定，角色定义取自 generation.character_prompt，
+自定义规范取自 prompt_writer.custom_instructions。
 """
 from __future__ import annotations
 
@@ -61,6 +65,89 @@ def _clean(raw: str) -> str:
     return text.strip(" ,。")
 
 
+async def write_prompt(
+    config: ImageGeneratorConfig,
+    description: str,
+    aspect: str = "",
+    extra: str = "",
+    stream_id: str = "",
+) -> tuple[bool, str]:
+    """把中文自然语言画面描述写成 NovelAI 标签串。
+
+    成功返回 ``(True, 纯标签串)``；失败返回 ``(False, 给聊天模型的提示)``。
+    不包含任何引导语，方便调用方直接拿标签串去用。
+
+    Args:
+        config: 已校验的插件配置实例。
+        description: 中文画面描述。
+        aspect: 画幅倾向（可选）。
+        extra: 本次硬性要求（可选）。
+        stream_id: 当前聊天流 ID（可选，用于链路追踪）。
+    """
+    writer = config.prompt_writer
+    if not writer.enabled:
+        return False, "内置提示词写手已禁用（prompt_writer.enabled=false），先自己写标签吧"
+
+    task_name = (writer.fallback_task_name or "").strip()
+    model_name = (writer.model_name or "").strip()
+    try:
+        if model_name:
+            model_set = get_model_set_by_name(
+                model_name,
+                temperature=writer.temperature,
+                max_tokens=writer.max_tokens,
+            )
+        elif task_name:
+            model_set = get_model_set_by_task(task_name)
+        else:
+            return False, "既没配 prompt_writer.model_name 也没配 fallback_task_name，先自己写标签吧"
+    except Exception as exc:
+        logger.warning("取写词模型失败（model=%r task=%r）: %s", model_name, task_name, exc)
+        return False, (
+            "写词模型没取到（检查 config/plugins/image_generator_plugin-neo/config.toml 的 "
+            "prompt_writer.model_name 是否是 model.toml 里存在的模型名），先按平时的方式自己写标签吧。"
+        )
+
+    extra_block = ""
+    custom = writer.custom_instructions.strip()
+    if custom:
+        extra_block += f"额外要求：\n{custom}\n"
+    if extra.strip():
+        extra_block += f"本次硬性要求：\n{extra.strip()}\n"
+
+    system_prompt = _SYSTEM.format(
+        character=config.generation.character_prompt.strip(),
+        extra=extra_block,
+    )
+    user_prompt = _USER.format(
+        description=description.strip(),
+        aspect=(f"画幅：{aspect.strip()}" if aspect.strip() else "画幅：按内容自行决定"),
+    )
+
+    try:
+        request = create_llm_request(
+            model_set=model_set,
+            request_name="image_prompt_writer",
+            context_manager=LLMContextManager(),
+            stream_id=stream_id or None,
+        )
+        request.add_payload(LLMPayload(ROLE.SYSTEM, [Text(system_prompt)]))
+        request.add_payload(LLMPayload(ROLE.USER, [Text(user_prompt)]))
+        response = await request.send(stream=False)
+        await response
+    except Exception as exc:
+        logger.warning("写词模型调用失败: %s", exc)
+        return False, f"写词模型调用失败（{exc}），先自己写标签吧"
+
+    tags = _clean(response.message or "")
+    if len(tags) < 10:
+        logger.warning("写词输出过短或为空: %r", tags)
+        return False, "写手模型这次没写出可用的标签，先自己写标签吧"
+
+    logger.info("写手模型完成写词（%d 字符，模型=%s）", len(tags), model_name or task_name or "task")
+    return True, tags
+
+
 class ImagePromptWriterTool(BaseTool):
     """把画面描述写成 NovelAI 标签串（用 [prompt_writer] 指定的模型）。"""
 
@@ -92,45 +179,6 @@ class ImagePromptWriterTool(BaseTool):
         config = getattr(plugin, "config", None)
         if not isinstance(config, ImageGeneratorConfig):
             return False, "配置未加载，先自己写标签吧"
-        writer = config.prompt_writer
-        if not writer.enabled:
-            return False, "内置提示词写手已禁用，先自己写标签吧"
-
-        task_name = (writer.fallback_task_name or "").strip()
-        model_name = (writer.model_name or "").strip()
-        try:
-            if model_name:
-                model_set = get_model_set_by_name(
-                    model_name,
-                    temperature=writer.temperature,
-                    max_tokens=writer.max_tokens,
-                )
-            elif task_name:
-                model_set = get_model_set_by_task(task_name)
-            else:
-                return False, "既没配 prompt_writer.model_name 也没配 fallback_task_name，先自己写标签吧"
-        except Exception as exc:
-            logger.warning("取写词模型失败（model=%r task=%r）: %s", model_name, task_name, exc)
-            return False, (
-                "写词模型没取到（检查 config/plugins/image_generator_plugin-neo/config.toml 的 "
-                "prompt_writer.model_name 是否是 model.toml 里存在的模型名），先按平时的方式自己写标签吧。"
-            )
-
-        extra_block = ""
-        custom = writer.custom_instructions.strip()
-        if custom:
-            extra_block += f"额外要求：\n{custom}\n"
-        if extra.strip():
-            extra_block += f"本次硬性要求：\n{extra.strip()}\n"
-
-        system_prompt = _SYSTEM.format(
-            character=config.generation.character_prompt.strip(),
-            extra=extra_block,
-        )
-        user_prompt = _USER.format(
-            description=description.strip(),
-            aspect=(f"画幅：{aspect.strip()}" if aspect.strip() else "画幅：按内容自行决定"),
-        )
 
         stream_id = ""
         try:
@@ -138,28 +186,17 @@ class ImagePromptWriterTool(BaseTool):
         except Exception:
             stream_id = ""
 
-        try:
-            request = create_llm_request(
-                model_set=model_set,
-                request_name="image_prompt_writer",
-                context_manager=LLMContextManager(),
-                stream_id=stream_id or None,
-            )
-            request.add_payload(LLMPayload(ROLE.SYSTEM, [Text(system_prompt)]))
-            request.add_payload(LLMPayload(ROLE.USER, [Text(user_prompt)]))
-            response = await request.send(stream=False)
-            await response
-        except Exception as exc:
-            logger.warning("写词模型调用失败: %s", exc)
-            return False, f"写词模型调用失败（{exc}），先自己写标签吧"
+        ok, result = await write_prompt(
+            config,
+            description.strip(),
+            aspect,
+            extra,
+            stream_id,
+        )
+        if not ok:
+            return False, result
 
-        tags = _clean(response.message or "")
-        if len(tags) < 10:
-            logger.warning("写词输出过短或为空: %r", tags)
-            return False, "写手模型这次没写出可用的标签，先自己写标签吧"
-
-        logger.info("写手模型完成写词（%d 字符，模型=%s）", len(tags), model_name or task_name or "task")
         return True, (
             "写手模型给出的标签如下。请把它**原样**填进 action-draw_image 的 content_description，"
-            "不要增删改写标签：\n\n" + tags
+            "不要增删改写标签：\n\n" + result
         )
