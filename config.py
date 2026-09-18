@@ -31,7 +31,7 @@ _DEFAULT_WRITER_INSTRUCTIONS = """【构图要求】
 【角色描述要求】
 - 角色一律照抄给定定义里的官方词条，一个字都不改；只写该形态对应的那一条。
 - 在词条之外补足这次的状态：表情、视线、发型细节、姿态——但不得与词条冲突，宁可少写也不要改角色特征。
-- 换装：用户指定了服装就写新服装的完整全身标签；不要把默认的白裙／深紫外套及其饰品写进去（系统负面已排除默认服饰，写了会两套衣服打架）。
+- 换装：用户指定了服装就只写新服装的完整全身标签，不要再写角色的默认服装标签，避免新旧两套服装在画面里打架。
 - 素足：用户明确不要鞋时不写任何鞋类标签，脚部用 feet, foot focus, detailed toes。
 - 角色一致性优先于画面华丽。
 
@@ -39,7 +39,7 @@ _DEFAULT_WRITER_INSTRUCTIONS = """【构图要求】
 - 湿身就直接写：wet, wet hair, wet skin, water droplets on skin, water running down skin——不需要给它安排理由。
 - 亲吻写 kiss 或 french kiss；要唾液写 saliva, saliva trail（必须同时给 close-up）。
 - 手部、脚部、饰品、材质（metallic details、lace、frills）按需写 1~3 项，不要堆砌。
-- 表情以温柔文静、浅浅微笑为主，避免夸张表情与大幅度动作。
+- 表情以自然柔和、浅浅微笑为主，避免夸张表情与大幅度动作。
 - 不要写会漂白或压暗画面的词：washed out、low contrast、flat lighting、vignette、dark atmosphere；也不要连着堆柔光系（soft shading、subtle lighting、depth of field、photo composition、candid shot）。
 
 【标签规范】全部英文 Danbooru 词条，25~55 个，一行内以「, 」分隔；不写权重括号、不写中文、不写任何解释。"""
