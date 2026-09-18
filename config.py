@@ -12,6 +12,38 @@ from pydantic import model_validator
 
 from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
+# 内置提示词写手（image_prompt 工具）默认给写手模型的标签层规范。
+# 只在调用写手时消耗，不占聊天模型每轮上下文。
+_DEFAULT_WRITER_INSTRUCTIONS = """【构图要求】
+- 每张都要写明景别与视角：景别从 close-up / upper body / medium shot / wide shot / full body 里挑一个写清；视角写 from below（仰视）、from above（俯视）或 eye level。
+- 全身图：头顶到脚部完整呈现、禁止裁切脚部、脚部与鞋履细节清晰；优先仰视或平视。
+- 细节要与景别匹配：唾液、水珠、眼神、饰件这类细节必须配 close-up 或 face focus；景别太远就别写这些细节。
+- 竖构图为常态；画面里放 1~2 个前景元素制造纵深，避免中间空、下方一大片空白。
+- 默认单人；多人必须在描述里写清人数与各自位置，不要含糊。
+
+【场景要求】
+- 场景写足五层，合计 8~20 个标签：① 空间（房间／场地类型与材质）② 光源（最关键，写清性质与方向，如 moonlight through window、warm lamp light、backlighting）③ 中景物件 2~4 件 ④ 前景元素 1~2 个 ⑤ 时间氛围。
+- 禁止只写「living room, night」这类两三个词的空场景——模型会自行编造出用户没要的东西。
+- 不要重复画风串里已有的词：depth of field、bokeh、soft focus background、atmospheric perspective、light particles。
+- 场景要与服装、姿势协调（海边／泳池配泳装，卧室夜晚配睡裙或家居服），不要互相打架。
+- 自拍类画面：普通自拍不写 holding phone / smartphone / camera；只有「对镜自拍」才写 mirror selfie, holding phone, smartphone, mirror, reflection。
+
+【角色描述要求】
+- 角色一律照抄给定定义里的官方词条，一个字都不改；只写该形态对应的那一条。
+- 在词条之外补足这次的状态：表情、视线、发型细节、姿态——但不得与词条冲突，宁可少写也不要改角色特征。
+- 换装：用户指定了服装就只写新服装的完整全身标签，不要再写角色的默认服装标签，避免新旧两套服装在画面里打架。
+- 素足：用户明确不要鞋时不写任何鞋类标签，脚部用 feet, foot focus, detailed toes。
+- 角色一致性优先于画面华丽。
+
+【细节要求】
+- 湿身就直接写：wet, wet hair, wet skin, water droplets on skin, water running down skin——不需要给它安排理由。
+- 亲吻写 kiss 或 french kiss；要唾液写 saliva, saliva trail（必须同时给 close-up）。
+- 手部、脚部、饰品、材质（metallic details、lace、frills）按需写 1~3 项，不要堆砌。
+- 表情以自然柔和、浅浅微笑为主，避免夸张表情与大幅度动作。
+- 不要写会漂白或压暗画面的词：washed out、low contrast、flat lighting、vignette、dark atmosphere；也不要连着堆柔光系（soft shading、subtle lighting、depth of field、photo composition、candid shot）。
+
+【标签规范】全部英文 Danbooru 词条，25~55 个，一行内以「, 」分隔；不写权重括号、不写中文、不写任何解释。"""
+
 
 class VibeItemConfig(SectionBase):
     """单个 Vibe 配置项，always 和 selectable 列表通用。"""
@@ -635,6 +667,46 @@ class ImageGeneratorConfig(BaseConfig):
             ),
         )
 
+    @config_section("prompt_writer")
+    class PromptWriterSection(SectionBase):
+        """内置提示词写手配置。
+
+        启用后插件额外提供一个 ``image_prompt`` 工具：让指定模型把自然语言画面描述写成
+        NovelAI 标签串，再由聊天模型原样填入 draw_image 的 content_description。
+        写词模型按 config/model.toml 里 models[].name 直接取用，不依赖 model_tasks。
+        """
+
+        enabled: bool = Field(
+            default=True,
+            description="是否启用内置提示词写手（提供 image_prompt 工具）",
+        )
+        model_name: str = Field(
+            default="deepseek-flash",
+            description=(
+                "写词模型——填 config/model.toml 里 models[].name（如 deepseek-flash、"
+                "[反]gemini-3.8-flash）。按名字直接取模型，不会被回写 model.toml 时丢掉。"
+            ),
+        )
+        temperature: float = Field(
+            default=0.6,
+            description="写词温度，越低越稳定。",
+        )
+        max_tokens: int = Field(
+            default=1600,
+            description="写词最大输出 token 数（标签串通常几百 token 足够）。",
+        )
+        fallback_task_name: str = Field(
+            default="",
+            description="可选：model_name 为空时改用的 model_tasks 任务名（留空即不用）。",
+        )
+        custom_instructions: str = Field(
+            default=_DEFAULT_WRITER_INSTRUCTIONS,
+            description=(
+                "写给写手模型的标签层规范（构图／场景／角色描述／细节／标签规范）。"
+                "只在调用写手时消耗，不占聊天模型每轮上下文。"
+            ),
+        )
+
     @config_section("vibe")
     class VibeSection(SectionBase):
         """Vibe 参考图注入配置。
@@ -705,6 +777,7 @@ class ImageGeneratorConfig(BaseConfig):
     generation: GenerationSection = Field(default_factory=GenerationSection)
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
     prompt: PromptSection = Field(default_factory=PromptSection)
+    prompt_writer: PromptWriterSection = Field(default_factory=PromptWriterSection)
     vibe: VibeSection = Field(default_factory=VibeSection)
     director_reference: DirectorReferenceSection = Field(default_factory=DirectorReferenceSection)
     webui: WebUISection = Field(default_factory=WebUISection)

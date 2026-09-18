@@ -37,6 +37,7 @@ from .commands import (
 from .config import ImageGeneratorConfig
 from .descriptions import build_draw_description
 from .engine import ImageEngine
+from .prompt_writer import ImagePromptWriterTool
 from .services.image_service import ImageGeneratorService
 from .webui import WebUIRouter
 
@@ -207,6 +208,9 @@ class ImageGeneratorPlugin(BasePlugin):
             return []
 
         components: list[type] = [ImageGeneratorService]
+
+        if config.prompt_writer.enabled:
+            components.append(ImagePromptWriterTool)
 
         if config.components.action_enabled:
             components.append(DrawAction)

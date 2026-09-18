@@ -14,6 +14,7 @@ from src.app.plugin_system.types import ChatType
 
 from ..descriptions import BASE_DRAW_DESCRIPTION
 from ..engine import CharacterPrompt, GenerationSpec, ImageResult
+from ..prompt_writer import write_prompt
 from .base import BaseImageAction
 
 logger = get_logger("image_generator_plugin.draw_action")
@@ -35,16 +36,20 @@ class DrawAction(BaseImageAction):
         self,
         content_description: Annotated[
             str,
-            "完整正面提示词。必须先选择 model，再按该模型在 Action 总描述中的专属语言、"
-            "权重、文字和能力规则组织；V4.5 使用英文标签，V5 可混合英文 Tag 与多语言自然语言，"
-            "但推荐以英文 Tag 建立主体，再用英语自然语言描述复杂动作、互动和空间关系，以获得最佳效果。",
-        ],
+            "完整正面提示词（英文标签串）。通常不用填——日常直接填 natural_description 即可，"
+            "系统会自动写词出图。仅当你需要精确控制标签、或配合多人物 characters 时才填这里。",
+        ] = "",
+        natural_description: Annotated[
+            str,
+            "中文自然语言画面描述（推荐日常使用）。直接写想画的内容：人物、服装、动作表情、场景、光线、景别视角。"
+            "系统会用专用写词模型自动翻译成 NovelAI 标签再出图。填了它就不需要再填 content_description。",
+        ] = "",
         output_filename: Annotated[
             str,
             "必填。输出文件名（不含扩展名，仅英文/数字/下划线）。"
             "图片以此文件名保存，后续 inpaint_image / director_tool 可通过此文件名引用。"
             "例如：'character_portrait_01' 或 'landscape_sunset_02'。",
-        ],
+        ] = "",
         resolution: Annotated[
             str,
             "图片画幅尺寸。横图用 '1216x832'，竖图用 '832x1216'，方图用 '1024x1024'。"
@@ -107,9 +112,24 @@ class DrawAction(BaseImageAction):
         ] = 1,
     ) -> tuple[bool, str]:
         """执行画图动作。"""
+        if natural_description.strip():
+            logger.info("使用中文自然语言自动写词")
+            ok, tags = await write_prompt(
+                self.plugin_config,
+                natural_description.strip(),
+                aspect="",
+                extra="",
+                stream_id=self.chat_stream.stream_id,
+            )
+            if not ok:
+                return False, tags
+            content_description = tags
+
         if not content_description.strip():
             logger.warning("画图动作未提供内容描述")
             return False, "画什么呢？请告诉我你想要的图片内容~"
+        if not output_filename.strip():
+            return False, "请提供 output_filename（输出文件名，仅英文/数字/下划线）~"
 
         engine = self.engine
         if engine is None:

@@ -19,6 +19,12 @@
   },
   "include": [
     {
+      "component_type": "tool",
+      "component_name": "image_prompt",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
       "component_type": "action",
       "component_name": "draw_image",
       "dependencies": [],
