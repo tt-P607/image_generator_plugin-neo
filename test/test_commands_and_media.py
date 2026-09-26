@@ -3,20 +3,41 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import inspect
 import io
 from pathlib import Path
-from typing import cast, get_type_hints
+from types import SimpleNamespace
+from typing import Awaitable, Callable, Iterator, cast, get_type_hints
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from PIL import Image, PngImagePlugin
 
+from src.core.managers.media_manager import MediaManager
+
 from image_generator_plugin_neo.commands import parsing
-from image_generator_plugin_neo.config import ImageGeneratorConfig, PromptPresetConfig
+from image_generator_plugin_neo.config import (
+    ImageGeneratorConfig,
+    PromptPresetConfig,
+    VibeItemConfig,
+)
 from image_generator_plugin_neo.actions.draw import DrawAction
+from image_generator_plugin_neo.actions.base import BaseImageAction
+from image_generator_plugin_neo.actions.director import BaseDirectorAction
+from image_generator_plugin_neo.actions.edit import EditImageAction
+from image_generator_plugin_neo.actions.enhance import EnhanceAction
+from image_generator_plugin_neo.actions.inpaint import InpaintAction
+from image_generator_plugin_neo.actions.upscale import UpscaleAction
 from image_generator_plugin_neo.descriptions import build_draw_description
-from image_generator_plugin_neo.engine import assets, storage
+from image_generator_plugin_neo.engine import assets
+from image_generator_plugin_neo.engine.settings import EngineSettings
+from image_generator_plugin_neo.generated_image_context import GeneratedImageContextHandler
 from image_generator_plugin_neo.media import extract_image_by_media_id, image_ops
+from image_generator_plugin_neo.plugin import ImageGeneratorPlugin
+from image_generator_plugin_neo import media
+from src.app.plugin_system.types import EventType, Image as LLMImage, LLMPayload, ROLE, Text
+from src.kernel.event import EventDecision
 
 
 def encode_png(image: Image.Image) -> str:
@@ -27,6 +48,322 @@ def encode_png(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode()
+
+
+@pytest.fixture
+def clean_pending_images() -> Iterator[dict[str, list[str]]]:
+    """隔离生成图待注入列表。"""
+    media.pending_generated_images.clear()
+    yield media.pending_generated_images
+    media.pending_generated_images.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "inject_into_context", "expected_context_mode"),
+    [
+        ("vlm", False, "placeholder"),
+        ("base64", False, "placeholder"),
+        ("vlm", True, "description"),
+        ("base64", True, "native"),
+    ],
+)
+async def test_send_generated_image_uses_media_context_mode(
+    mode: str, inject_into_context: bool, expected_context_mode: str,
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """关闭注入时只保留占位符，开启后按所选模式发送。"""
+    with patch.object(media, "send_media", new_callable=AsyncMock, return_value=True) as send:
+        assert await media.send_generated_image(
+            "image-data", "stream", mode, inject_into_context=inject_into_context,
+        )
+    send.assert_awaited_once_with(
+        "image", "image-data", stream_id="stream", reply_to=None,
+        context_mode=expected_context_mode,
+    )
+    expected_ids = (
+        [hashlib.sha256(b"image-data").hexdigest()]
+        if expected_context_mode == "native" else []
+    )
+    assert clean_pending_images.get("stream", []) == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_generated_image_context_injects_once_after_success(
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """同流的聊天请求注入原图，成功后下轮不重复注入。"""
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+    config.plugin.inject_generated_image = True
+    config.plugin.output_image_context = "base64"
+    handler = GeneratedImageContextHandler(ImageGeneratorPlugin(config))
+    media_id = "a" * 64
+    clean_pending_images["stream-a"] = [media_id]
+    metadata = {"stream_id": "stream-a"}
+    params = {
+        "meta_data": metadata,
+        "payloads": [LLMPayload(ROLE.USER, Text("生成一张图"))],
+        "tools": [DrawAction],
+    }
+
+    with patch(
+        "image_generator_plugin_neo.generated_image_context.get_media_file",
+        new_callable=AsyncMock, return_value="base64|aGVsbG8=",
+    ) as load:
+        decision, updated = await handler.execute(EventType.BEFORE_LLM_REQUEST, params)
+
+    assert decision == EventDecision.SUCCESS
+    injected = updated["payloads"][-1]
+    assert injected.role == ROLE.USER
+    assert [part.value for part in injected.content if isinstance(part, LLMImage)] == ["aGVsbG8="]
+    assert media_id in "".join(part.text for part in injected.content if isinstance(part, Text))
+    load.assert_awaited_once_with(media_id)
+
+    await handler.execute(EventType.AFTER_LLM_REQUEST, {"meta_data": metadata, "success": True})
+    assert "stream-a" not in clean_pending_images
+    next_params = {"meta_data": metadata, "payloads": updated["payloads"], "tools": [DrawAction]}
+    decision, _ = await handler.execute(EventType.BEFORE_LLM_REQUEST, next_params)
+    assert decision == EventDecision.PASS
+    assert len(next_params["payloads"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_generated_image_context_skips_unrelated_requests(
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """不将待注入图像送给其他流或同流的无关模型调用。"""
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+    config.plugin.inject_generated_image = True
+    config.plugin.output_image_context = "base64"
+    handler = GeneratedImageContextHandler(ImageGeneratorPlugin(config))
+    media_id = "b" * 64
+    clean_pending_images["stream-a"] = [media_id]
+    payloads = [LLMPayload(ROLE.USER, Text("无关请求"))]
+    for stream_id, tools in (("stream-b", [DrawAction]), ("stream-a", [])):
+        decision, _ = await handler.execute(EventType.BEFORE_LLM_REQUEST, {
+            "meta_data": {"stream_id": stream_id}, "payloads": payloads, "tools": tools,
+        })
+        assert decision == EventDecision.PASS
+
+    with patch(
+        "image_generator_plugin_neo.generated_image_context.get_media_file",
+        new_callable=AsyncMock, return_value="aGVsbG8=",
+    ):
+        decision, _ = await handler.execute(EventType.BEFORE_LLM_REQUEST, {
+            "meta_data": {"stream_id": "stream-a"},
+            "payloads": [LLMPayload(ROLE.USER, Text(f"Bot: [图片({media_id})]"))],
+            "tools": [],
+        })
+    assert decision == EventDecision.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_generated_image_context_retry_keeps_pending(
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """未成功的模型请求不消费图片，下次发送仍可注入。"""
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+    config.plugin.inject_generated_image = True
+    config.plugin.output_image_context = "base64"
+    handler = GeneratedImageContextHandler(ImageGeneratorPlugin(config))
+    media_id = "c" * 64
+    clean_pending_images["stream-a"] = [media_id]
+    metadata = {"stream_id": "stream-a"}
+    with patch(
+        "image_generator_plugin_neo.generated_image_context.get_media_file",
+        new_callable=AsyncMock, return_value="aGVsbG8=",
+    ) as load:
+        for _ in range(2):
+            params = {"meta_data": metadata, "payloads": [LLMPayload(ROLE.USER, Text("续轮"))], "tools": [DrawAction]}
+            decision, _ = await handler.execute(EventType.BEFORE_LLM_REQUEST, params)
+            assert decision == EventDecision.SUCCESS
+            await handler.execute(EventType.AFTER_LLM_REQUEST, {"meta_data": metadata, "success": False})
+    assert load.await_count == 2
+    assert clean_pending_images["stream-a"] == [media_id]
+
+
+@pytest.mark.asyncio
+async def test_generated_image_context_preserves_order_and_drops_missing_media(
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """批量生图按发送顺序注入，无法回查的媒体不阻塞后续请求。"""
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+    config.plugin.inject_generated_image = True
+    config.plugin.output_image_context = "base64"
+    handler = GeneratedImageContextHandler(ImageGeneratorPlugin(config))
+    first_id, missing_id, last_id = "a" * 64, "b" * 64, "c" * 64
+    clean_pending_images["stream-a"] = [first_id, missing_id, last_id]
+    metadata = {"stream_id": "stream-a"}
+    with patch(
+        "image_generator_plugin_neo.generated_image_context.get_media_file",
+        new_callable=AsyncMock, side_effect=["YWJj", None, "ZGVm"],
+    ) as load:
+        _, params = await handler.execute(EventType.BEFORE_LLM_REQUEST, {
+            "meta_data": metadata,
+            "payloads": [LLMPayload(ROLE.USER, Text("继续"))],
+            "tools": [DrawAction],
+        })
+    assert [part.value for part in params["payloads"][-1].content if isinstance(part, LLMImage)] == [
+        "YWJj", "ZGVm",
+    ]
+    assert [call.args[0] for call in load.await_args_list] == [first_id, missing_id, last_id]
+    assert clean_pending_images["stream-a"] == [first_id, last_id]
+    await handler.execute(EventType.AFTER_LLM_REQUEST, {"meta_data": metadata, "success": True})
+    assert "stream-a" not in clean_pending_images
+
+
+@pytest.mark.asyncio
+async def test_generated_image_context_cleared_when_mode_disabled(
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """关闭原图注入后不把之前未消费的图片送进下一次模型请求。"""
+    config = ImageGeneratorConfig()
+    config.plugin.enabled = True
+    config.plugin.inject_generated_image = True
+    config.plugin.output_image_context = "base64"
+    plugin = ImageGeneratorPlugin(config)
+    clean_pending_images["stream-a"] = ["a" * 64]
+    new_config = ImageGeneratorConfig()
+    new_config.plugin.enabled = True
+    new_config.plugin.output_image_context = "vlm"
+    with patch.object(plugin, "_sync_rule_reminder"):
+        await plugin.apply_config(new_config)
+    assert not clean_pending_images
+
+
+@pytest.mark.asyncio
+async def test_generated_image_vlm_error_falls_back_to_placeholder() -> None:
+    """框架识别抛出异常时，图片仅以占位符发送一次。"""
+    with patch.object(
+        media, "send_media", new_callable=AsyncMock,
+        side_effect=[RuntimeError("VLM unavailable"), True],
+    ) as send:
+        assert await media.send_generated_image(
+            "image-data", "stream", "vlm", inject_into_context=True,
+        )
+    assert [call.kwargs["context_mode"] for call in send.await_args_list] == [
+        "description", "placeholder",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generated_image_failed_send_is_not_retried() -> None:
+    """平台发图失败不当作识别错误重复发送。"""
+    with patch.object(media, "send_media", new_callable=AsyncMock, return_value=False) as send:
+        assert not await media.send_generated_image(
+            "image-data", "stream", "vlm", inject_into_context=True,
+        )
+    send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_action_sends_using_configured_context_mode(tmp_path: Path) -> None:
+    """Action 入口透传插件模式，发图失败不会报告成功。"""
+    config = ImageGeneratorConfig()
+    config.plugin.output_image_context = "base64"
+    config.plugin.inject_generated_image = True
+    action = cast(BaseImageAction, SimpleNamespace(
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+    ))
+    with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value="aGVsbG8="), \
+         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=False) as send:
+        result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
+
+    assert result == (False, "图片发送失败")
+    send.assert_awaited_once_with(
+        "aGVsbG8=", stream_id="stream", mode="base64", inject_into_context=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_action_returns_cached_media_id(tmp_path: Path) -> None:
+    """Action 返回发送内容的媒体 ID，并确认图片可在媒体库回查。"""
+    config = ImageGeneratorConfig()
+    action = cast(BaseImageAction, SimpleNamespace(
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+    ))
+    image_b64 = "aGVsbG8="
+    media_id = hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
+    with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value=image_b64), \
+         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=True), \
+         patch("image_generator_plugin_neo.actions.base.get_media_info", new_callable=AsyncMock, return_value={"image_id": media_id, "path": "cached.png"}) as get_info:
+        result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
+
+    assert result == (True, media_id)
+    get_info.assert_awaited_once_with(media_id)
+
+
+@pytest.mark.asyncio
+async def test_action_rejects_uncached_sent_image(tmp_path: Path) -> None:
+    """平台发图成功但缓存缺失时，不返回无法使用的媒体 ID。"""
+    config = ImageGeneratorConfig()
+    action = cast(BaseImageAction, SimpleNamespace(
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+    ))
+    with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value="aGVsbG8="), \
+         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=True), \
+         patch("image_generator_plugin_neo.actions.base.get_media_info", new_callable=AsyncMock, return_value=None):
+        result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
+
+    assert result[0] is False
+    assert "缓存不可回查" in result[1]
+
+
+@pytest.mark.asyncio
+async def test_action_returns_all_media_ids_without_renaming(tmp_path: Path) -> None:
+    """多张图片逐张发送并返回对应 ID，保持引擎生成的本地文件名。"""
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    send_image = AsyncMock(side_effect=[(True, "first-id"), (True, "second-id")])
+    action = cast(BaseImageAction, SimpleNamespace(
+        image_plugin=object(), chat_stream=SimpleNamespace(stream_id="stream"),
+        _send_image=send_image,
+    ))
+
+    async def run_work(
+        plugin: object,
+        factory: Callable[[], Awaitable[tuple[bool, str]]],
+        **options: object,
+    ) -> tuple[bool, str]:
+        return await factory()
+
+    work = AsyncMock(return_value=(
+        SimpleNamespace(success=True, path=first),
+        SimpleNamespace(success=True, path=second),
+    ))
+    with patch("image_generator_plugin_neo.actions.base.background.run_shielded", new=run_work):
+        success, message = await BaseImageAction.run_in_background(
+            action, work, task_name="draw", purpose="draw", success_message="已发送", error_prefix="失败",
+        )
+
+    assert success is True
+    assert message == "已发送（media_id: first-id, second-id）"
+    assert "first.png" not in message
+    assert send_image.await_args_list[0].args == (first,)
+    assert send_image.await_args_list[1].args == (second,)
+
+
+def test_action_schemas_expose_media_ids_not_filenames() -> None:
+    """所有生图 Action 均不要求模型传入输出或来源文件名。"""
+    for action in (
+        DrawAction, EditImageAction, InpaintAction, BaseDirectorAction,
+        EnhanceAction, UpscaleAction,
+    ):
+        parameters = inspect.signature(action.execute).parameters
+        assert "output_filename" not in parameters
+        assert "image_filename" not in parameters
+
+
+def test_action_media_id_matches_framework_hash() -> None:
+    """Action 使用的纯 base64 图片 ID 与框架发送缓存算法相同。"""
+    image_b64 = encode_png(Image.new("RGB", (2, 2), (10, 20, 30)))
+    assert hashlib.sha256(image_b64.encode("utf-8")).hexdigest() == MediaManager.compute_media_hash(
+        f"base64|{image_b64}"
+    )
 
 
 def test_extract_scale_flags_keeps_zero_value() -> None:
@@ -189,6 +526,80 @@ def test_preencoded_vibe_rejects_damaged_encoding(tmp_path: Path) -> None:
         assets.read_preencoded_vector(vibe_file, "nai-diffusion-4-5-full")
 
 
+@pytest.mark.asyncio
+async def test_preencoded_vibe_without_model_vector_never_calls_encoder(
+    tmp_path: Path,
+) -> None:
+    """预编码文件缺少当前模型向量时不得回退到在线编码。"""
+
+    vibe_file = tmp_path / "full-only.naiv4vibe"
+    vibe_file.write_text(
+        '{"image":"source-image","encodings":{"v4-5full":{}}}',
+        encoding="utf-8",
+    )
+    encoder = AsyncMock(return_value="network-vector")
+    library = assets.AssetLibrary()
+    settings = cast(EngineSettings, SimpleNamespace(vibe_storage_dir=tmp_path))
+
+    loaded = await library._load_vibes(
+        settings,
+        [VibeItemConfig(file=vibe_file.name)],
+        encoder,
+        "nai-diffusion-4-5-curated",
+    )
+
+    assert loaded == []
+    encoder.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "available_models",
+    [
+        ["nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"],
+        ["nai-diffusion-4-5-curated", "nai-diffusion-4-5-full"],
+    ],
+)
+async def test_preencoded_vibe_selects_vector_by_request_model_regardless_of_order(
+    tmp_path: Path,
+    available_models: list[str],
+) -> None:
+    """预编码 Vibe 按实际请求模型选向量，不依赖白名单顺序。"""
+
+    vibe_file = tmp_path / "both.naiv4vibe"
+    vibe_file.write_text(
+        """{
+            "encodings": {
+                "v4-5full": {"0": {"encoding": "ZnVsbA=="}},
+                "v4-5curated": {"0": {"encoding": "Y3VyYXRlZA=="}}
+            }
+        }""",
+        encoding="utf-8",
+    )
+    config = ImageGeneratorConfig()
+    config.api.api_keys = ["test-key"]
+    config.generation.model = available_models[0]
+    config.generation.available_models = available_models
+    config.advanced.vibe_storage_dir = str(tmp_path)
+    settings = EngineSettings.from_config(config)
+    encoder = AsyncMock(return_value="network-vector")
+    library = assets.AssetLibrary()
+
+    await library.reload(
+        settings,
+        always_items=[],
+        selectable_items=[VibeItemConfig(file=vibe_file.name)],
+        director_items=[],
+        encoder=encoder,
+    )
+
+    full = library.select_vibes(("both",), "v4-5full")
+    curated = library.select_vibes(("both",), "v4-5curated")
+    assert [asset.data for asset in full] == ["ZnVsbA=="]
+    assert [asset.data for asset in curated] == ["Y3VyYXRlZA=="]
+    encoder.assert_not_awaited()
+
+
 def test_rect_mask_marks_only_selected_region() -> None:
     """验证矩形遮罩仅在指定区域为白色不透明。"""
 
@@ -224,19 +635,6 @@ def test_rect_mask_aligns_to_latent_blocks() -> None:
         assert (white_columns[-1] + 1) % 8 == 0
         assert white_rows[0] % 8 == 0
         assert (white_rows[-1] + 1) % 8 == 0
-
-
-def test_rename_with_stem_avoids_overwriting(tmp_path: Path) -> None:
-    """验证重名时自动追加序号，不覆盖已有文件。"""
-
-    first = tmp_path / "a.png"
-    first.write_bytes(b"first")
-    existing = tmp_path / "portrait.png"
-    existing.write_bytes(b"existing")
-
-    renamed = storage.rename_with_stem(first, "portrait")
-    assert renamed.name == "portrait_2.png"
-    assert existing.read_bytes() == b"existing"
 
 
 def test_draw_description_rebuilds_without_accumulating() -> None:

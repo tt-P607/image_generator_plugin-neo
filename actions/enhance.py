@@ -29,9 +29,7 @@ class EnhanceAction(BaseImageAction):
         strength: Annotated[float, "增强强度 0.01~0.99。"] = 0.5,
         noise: Annotated[float, "噪声 0.0~0.99；显式 0 会原样发送。"] = 0.0,
         model: Annotated[str, "可选模型；Max 必须使用 V5。"] = "",
-        media_id: Annotated[str, "用户图片的媒体 ID。"] = "",
-        image_filename: Annotated[str, "Bot 已生成图片的文件名。"] = "",
-        output_filename: Annotated[str, "增强结果文件名，不含扩展名。"] = "",
+        media_id: Annotated[str, "用户图片占位符或 Bot 出图 Action 返回的媒体 ID。"] = "",
     ) -> tuple[bool, str]:
         """执行 Enhance。"""
 
@@ -40,9 +38,9 @@ class EnhanceAction(BaseImageAction):
             return False, "图片生成服务不可用"
         if upscale not in ("1x", "1.5x", "2x", "Max"):
             return False, f"upscale 不合法（当前为 {upscale!r}）"
-        source = await self.resolve_source_image(image_filename, media_id)
+        source = await self.resolve_source_image(media_id)
         if not source:
-            return False, "需要提供 media_id 或 image_filename 才能增强图片"
+            return False, "需要提供 media_id 才能增强图片"
         spec = EnhanceSpec(
             prompt=prompt,
             user_id=self.triggering_user_id,
@@ -62,5 +60,4 @@ class EnhanceAction(BaseImageAction):
             purpose="action_enhance",
             success_message="[内部：已发送增强结果]",
             error_prefix="图片增强失败",
-            output_filename=output_filename,
         )

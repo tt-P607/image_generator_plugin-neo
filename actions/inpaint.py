@@ -32,9 +32,8 @@ class InpaintAction(BaseImageAction):
     description: str = (
         "对图片进行局部重绘——保留未指定区域，仅重绘指定部分。\n"
         "使用场景：修改图片中某个元素的样式、替换背景局部、修正细节等。\n\n"
-        "**图片来源**：\n"
-        "  - 处理用户发送的图片：从上下文 [图片(media_id)] 提取哈希值填入 media_id 参数\n"
-        "  - 处理 Bot 自己生成的图片：填写 image_filename 参数\n\n"
+        "**图片来源**：从上下文 [图片(media_id)] 或出图 Action 的返回值中提取媒体 ID，"
+        "填入 media_id 参数。\n\n"
         "**遮罩区域参数**（mask_area）：\n"
         "  JSON 对象，指定矩形重绘区域，坐标为 0.0-1.0 比例值"
         "（与图片宽高无关，适用于任意画幅）：\n"
@@ -54,10 +53,7 @@ class InpaintAction(BaseImageAction):
         "  - 例如换衣服：原图是 '1girl, white shirt, skirt, standing, looking at viewer'，\n"
         "    修改后传 '1girl, pink dress, frills, standing, looking at viewer'\n"
         "  - 画风标签（如 game cg）需保留，保持与原图一致\n"
-        "  - 负面提示词中排除可能渗透的默认饰品（如 hair ornament, wings, cape 等）\n\n"
-        "**文件名规范**：\n"
-        "  出图成功后返回值包含文件名，后续可通过 image_filename 引用此图片。\n"
-        "  文件名格式：仅英文/数字/下划线，不含扩展名。"
+        "  - 负面提示词中排除可能渗透的默认饰品（如 hair ornament, wings, cape 等）"
     )
 
     async def execute(
@@ -117,20 +113,7 @@ class InpaintAction(BaseImageAction):
         ] = None,
         media_id: Annotated[
             str,
-            "待处理图片的媒体 ID。用户发送的图片在上下文中以 "
-            "[图片(media_id)] 出现，从占位符括号内提取哈希值填入此参数。"
-            "处理 Bot 自己生成的图片时留空，改用 image_filename。",
-        ] = "",
-        image_filename: Annotated[
-            str,
-            "Bot 自己生成的图片文件名（draw_image 时自定义的 output_filename）。"
-            "填写后从产图目录加载该图片进行局部重绘，无需引用消息。"
-            "处理用户发送的图片时留空，改用 media_id。",
-        ] = "",
-        output_filename: Annotated[
-            str,
-            "输出文件名（不含扩展名，仅英文/数字/下划线）。"
-            "留空则使用随机文件名。",
+            "待处理图片的媒体 ID。从用户图片的 [图片(media_id)] 占位符或 Bot 出图 Action 返回值获取。",
         ] = "",
     ) -> tuple[bool, str]:
         """执行局部重绘。"""
@@ -142,14 +125,12 @@ class InpaintAction(BaseImageAction):
         if isinstance(area, str):
             return False, area
 
-        image_b64 = await self.resolve_source_image(image_filename, media_id)
+        image_b64 = await self.resolve_source_image(media_id)
         if not image_b64:
             hint = (
                 f"找不到 media_id={media_id} 对应的图片"
                 if media_id.strip()
-                else f"找不到文件名为 '{image_filename}' 的图片"
-                if image_filename.strip()
-                else "需要先发一张图片（提供 media_id 或 image_filename），我才能帮你局部重绘哦"
+            else "需要先发一张图片（提供 media_id），我才能帮你局部重绘哦"
             )
             await self.notify(hint)
             return False, hint
@@ -215,7 +196,6 @@ class InpaintAction(BaseImageAction):
             purpose="action_inpaint",
             success_message="[内部：已发送局部重绘图片]",
             error_prefix="局部重绘失败",
-            output_filename=output_filename,
         )
 
 

@@ -38,6 +38,8 @@ from .config import ImageGeneratorConfig
 from .descriptions import build_draw_description
 from .engine import ImageEngine
 from .services.image_service import ImageGeneratorService
+from .generated_image_context import GeneratedImageContextHandler
+from .media import pending_generated_images
 from .webui import WebUIRouter
 
 logger = get_logger("image_generator_plugin")
@@ -128,6 +130,7 @@ class ImageGeneratorPlugin(BasePlugin):
         self._background_task_ids.clear()
 
         self._clear_rule_reminder()
+        pending_generated_images.clear()
 
         if self.engine is not None:
             await self.engine.close()
@@ -140,6 +143,8 @@ class ImageGeneratorPlugin(BasePlugin):
             config: 已校验的新配置实例
         """
         self.config = cast(ImageGeneratorConfig, config)
+        if not config.plugin.enabled or not config.plugin.inject_generated_image or config.plugin.output_image_context != "base64":
+            pending_generated_images.clear()
         if self.engine is not None:
             await self.engine.reload(config)
         self._refresh_draw_description(config)
@@ -206,7 +211,7 @@ class ImageGeneratorPlugin(BasePlugin):
         if not config.plugin.enabled:
             return []
 
-        components: list[type] = [ImageGeneratorService]
+        components: list[type] = [ImageGeneratorService, GeneratedImageContextHandler]
 
         if config.components.action_enabled:
             components.append(DrawAction)

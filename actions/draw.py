@@ -39,12 +39,6 @@ class DrawAction(BaseImageAction):
             "权重、文字和能力规则组织；V4.5 使用英文标签，V5 可混合英文 Tag 与多语言自然语言，"
             "但推荐以英文 Tag 建立主体，再用英语自然语言描述复杂动作、互动和空间关系，以获得最佳效果。",
         ],
-        output_filename: Annotated[
-            str,
-            "必填。输出文件名（不含扩展名，仅英文/数字/下划线）。"
-            "图片以此文件名保存，后续 inpaint_image / director_tool 可通过此文件名引用。"
-            "例如：'character_portrait_01' 或 'landscape_sunset_02'。",
-        ],
         resolution: Annotated[
             str,
             "图片画幅尺寸。横图用 '1216x832'，竖图用 '832x1216'，方图用 '1024x1024'。"
@@ -157,7 +151,6 @@ class DrawAction(BaseImageAction):
             purpose="action_draw",
             success_message="[内部：已发送画作]",
             error_prefix="画画失败了",
-            output_filename=output_filename,
         )
 
     def _build_prompt(self, content_tags: str) -> str:

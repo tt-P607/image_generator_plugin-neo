@@ -59,7 +59,6 @@ class EngineSettings:
         channel: 生图渠道，"official" 或 "gateway"
         api_keys: API Key 列表，按序轮换
         base_url: 渠道端点，official 为生图完整路径，gateway 为服务根地址
-        api_base_url: official 渠道的 API 域名
         proxy: HTTP 代理地址，空串表示不使用
         cooldown: 两次请求之间的最小间隔秒数
         model: 绘图模型名
@@ -86,7 +85,6 @@ class EngineSettings:
     channel: str
     api_keys: tuple[str, ...]
     base_url: str
-    api_base_url: str
     proxy: str
     cooldown: int
 
@@ -154,7 +152,6 @@ class EngineSettings:
             channel=config.api.channel,
             api_keys=tuple(config.api.api_keys),
             base_url=config.api.base_url,
-            api_base_url=config.api.api_base_url,
             proxy=config.api.proxy,
             cooldown=config.api.cooldown,
             model=default_model,
@@ -266,13 +263,27 @@ class EngineSettings:
         return sampler, configured_schedule
 
     @property
-    def vibe_model(self) -> str | None:
-        """返回白名单中用于加载和编码 Vibe 的 V4.5 模型。"""
+    def vibe_models(self) -> tuple[str, ...]:
+        """返回白名单中所有编码键不同的 Vibe 模型。"""
 
+        models: list[str] = []
+        encoding_keys: set[str] = set()
         for model in self.allowed_models:
-            if self.model_profile(model).supports_vibe:
-                return model
-        return None
+            profile = self.model_profile(model)
+            encoding_key = profile.vibe_encoding_key
+            if not profile.supports_vibe or encoding_key is None:
+                continue
+            if encoding_key in encoding_keys:
+                continue
+            encoding_keys.add(encoding_key)
+            models.append(model)
+        return tuple(models)
+
+    def vibe_encoding_key(self, model: str) -> str | None:
+        """返回指定模型使用的 Vibe 编码键。"""
+
+        profile = self.model_profile(model)
+        return profile.vibe_encoding_key if profile.supports_vibe else None
 
     @property
     def is_gateway(self) -> bool:
@@ -331,31 +342,54 @@ class EngineSettings:
         return self.base_url
 
     @property
+    def official_api_root(self) -> str:
+        """official 渠道原生协议根地址。
+
+        由 ``base_url`` 去掉末尾的生图端点路径得到，使 2× 放大、导演工具、
+        Vibe 编码和订阅查询跟随同一域名与路径前缀（官方域名或镜像前缀均可）。
+        ``base_url`` 不含生图端点路径时按原样作为根地址。
+        """
+
+        root = self.base_url.rstrip("/")
+        if root.endswith(OFFICIAL_GENERATE_PATH):
+            root = root[: -len(OFFICIAL_GENERATE_PATH)]
+        return root
+
+    def official_url(self, path: str) -> str:
+        """拼接 official 渠道原生端点完整 URL。
+
+        Args:
+            path: 以 / 开头的端点路径，如 "/ai/augment-image"
+
+        Returns:
+            完整请求 URL
+        """
+
+        return f"{self.official_api_root}{path}"
+
+    @property
     def official_encode_vibe_url(self) -> str:
         """official 渠道 Vibe 编码端点。"""
 
-        return self.base_url.replace(
-            OFFICIAL_GENERATE_PATH,
-            OFFICIAL_ENCODE_VIBE_PATH,
-        )
+        return self.official_url(OFFICIAL_ENCODE_VIBE_PATH)
 
     @property
     def official_augment_url(self) -> str:
         """official 渠道导演工具端点。"""
 
-        return f"{self.api_base_url.rstrip('/')}{OFFICIAL_AUGMENT_PATH}"
+        return self.official_url(OFFICIAL_AUGMENT_PATH)
 
     @property
     def official_upscale_url(self) -> str:
         """official 渠道固定 2× 放大端点。"""
 
-        return f"{self.api_base_url.rstrip('/')}{OFFICIAL_UPSCALE_PATH}"
+        return self.official_url(OFFICIAL_UPSCALE_PATH)
 
     @property
     def official_subscription_url(self) -> str:
         """official 渠道订阅信息端点。"""
 
-        return f"{self.api_base_url.rstrip('/')}{OFFICIAL_SUBSCRIPTION_PATH}"
+        return self.official_url(OFFICIAL_SUBSCRIPTION_PATH)
 
     def output_dir(self, from_command: bool) -> Path:
         """按调用来源选择图片保存目录。

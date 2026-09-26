@@ -20,8 +20,7 @@ logger = get_logger("image_generator_plugin.director_action")
 
 IMAGE_SOURCE_HINT = (
     "**图片来源**：\n"
-    "  - 处理用户发送的图片：从上下文 [图片(media_id)] 提取哈希值填入 media_id 参数\n"
-    "  - 处理 Bot 自己生成的图片：填写 image_filename 参数"
+    "  - 从上下文 [图片(media_id)] 或出图 Action 返回值中提取媒体 ID，填入 media_id 参数"
 )
 FREE_TIER_HINT = "标准尺寸（≤1024×1024）内免费。"
 
@@ -45,15 +44,7 @@ class BaseDirectorAction(BaseImageAction):
         self,
         media_id: Annotated[
             str,
-            "待处理图片的媒体 ID。用户发送的图片在上下文中以 "
-            "[图片(media_id)] 出现，从占位符括号内提取哈希值填入此参数。"
-            "处理 Bot 自己生成的图片时留空，改用 image_filename。",
-        ] = "",
-        image_filename: Annotated[
-            str,
-            "Bot 自己生成的图片文件名（draw_image 时自定义的 output_filename）。"
-            "填写后从产图目录加载该图片处理，无需引用消息。"
-            "处理用户发送的图片时留空，改用 media_id。",
+            "待处理图片的媒体 ID。从用户图片的 [图片(media_id)] 占位符或 Bot 出图 Action 返回值获取。",
         ] = "",
         prompt: Annotated[
             str,
@@ -63,11 +54,6 @@ class BaseDirectorAction(BaseImageAction):
             int,
             "去模糊强度 0-5，默认 0。仅上色与改表情工具有效。",
         ] = 0,
-        output_filename: Annotated[
-            str,
-            "输出文件名（不含扩展名，仅英文/数字/下划线）。"
-            "留空则使用随机文件名。",
-        ] = "",
     ) -> tuple[bool, str]:
         """执行导演工具处理。"""
         engine = self.engine
@@ -77,14 +63,12 @@ class BaseDirectorAction(BaseImageAction):
         if self.needs_prompt and not prompt.strip():
             return False, f"{self.tool_display}工具需要提供 prompt 参数"
 
-        image_b64 = await self.resolve_source_image(image_filename, media_id)
+        image_b64 = await self.resolve_source_image(media_id)
         if not image_b64:
             hint = (
                 f"找不到 media_id={media_id} 对应的图片"
                 if media_id.strip()
-                else f"找不到文件名为 '{image_filename}' 的图片"
-                if image_filename.strip()
-                else "需要先发一张图片（提供 media_id 或 image_filename），我才能帮你处理哦"
+            else "需要先发一张图片（提供 media_id），我才能帮你处理哦"
             )
             await self.notify(hint)
             return False, hint
@@ -122,7 +106,6 @@ class BaseDirectorAction(BaseImageAction):
             purpose=f"action_director_{self.tool_type}",
             success_message=f"[内部：已发送{self.tool_display}结果]",
             error_prefix=f"{self.tool_display}失败",
-            output_filename=output_filename,
         )
 
 

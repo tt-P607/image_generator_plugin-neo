@@ -29,19 +29,15 @@ class EditImageAction(BaseImageAction):
         "图生图（Img2Img）——以一张已有图片为底，按提示词对整张画面重绘。\n"
         "使用场景：改变画风、微调整体内容、把草图/照片重绘成插画等。\n"
         "与 inpaint_image 的区别：不需要指定区域，整张图都会参与重绘。\n\n"
-        "**图片来源**：\n"
-        "  - 处理用户发送的图片：从上下文 [图片(media_id)] 提取哈希值填入 media_id 参数\n"
-        "  - 处理 Bot 自己生成的图片：填写 image_filename 参数\n\n"
+        "**图片来源**：从上下文 [图片(media_id)] 或出图 Action 的返回值中提取媒体 ID，"
+        "填入 media_id 参数。\n\n"
         "**重绘强度**（strength）：\n"
         "  0.01-1.0，越高越偏离原图。\n"
         "  轻微调整建议 0.3-0.5，风格转换建议 0.5-0.7，大改建议 0.7-0.9。\n\n"
         "**提示词规范**：\n"
         "  content_description 描述重绘后整张图的完整内容，并遵守所选模型的提示词规则；\n"
         "  V4.5 使用英文 NovelAI 标签，V5 可混合英文 Tag 与中、日、英文自然语言。\n"
-        "  建议在原图内容基础上增删，保留想维持的元素标签。\n\n"
-        "**文件名规范**：\n"
-        "  出图成功后返回值包含文件名，后续可通过 image_filename 引用此图片。\n"
-        "  文件名格式：仅英文/数字/下划线，不含扩展名。"
+        "  建议在原图内容基础上增删，保留想维持的元素标签。"
     )
 
     async def execute(
@@ -83,20 +79,7 @@ class EditImageAction(BaseImageAction):
         ] = "",
         media_id: Annotated[
             str,
-            "待处理图片的媒体 ID。用户发送的图片在上下文中以 "
-            "[图片(media_id)] 出现，从占位符括号内提取哈希值填入此参数。"
-            "处理 Bot 自己生成的图片时留空，改用 image_filename。",
-        ] = "",
-        image_filename: Annotated[
-            str,
-            "Bot 自己生成的图片文件名（draw_image 时自定义的 output_filename）。"
-            "填写后从产图目录加载该图片进行图生图，无需引用消息。"
-            "处理用户发送的图片时留空，改用 media_id。",
-        ] = "",
-        output_filename: Annotated[
-            str,
-            "输出文件名（不含扩展名，仅英文/数字/下划线）。"
-            "留空则使用随机文件名。",
+            "待处理图片的媒体 ID。从用户图片的 [图片(media_id)] 占位符或 Bot 出图 Action 返回值获取。",
         ] = "",
     ) -> tuple[bool, str]:
         """执行图生图。"""
@@ -107,14 +90,12 @@ class EditImageAction(BaseImageAction):
         if engine is None:
             return False, "图片生成服务不可用"
 
-        image_b64 = await self.resolve_source_image(image_filename, media_id)
+        image_b64 = await self.resolve_source_image(media_id)
         if not image_b64:
             hint = (
                 f"找不到 media_id={media_id} 对应的图片"
                 if media_id.strip()
-                else f"找不到文件名为 '{image_filename}' 的图片"
-                if image_filename.strip()
-                else "需要先发一张图片（提供 media_id 或 image_filename），我才能帮你图生图哦"
+            else "需要先发一张图片（提供 media_id），我才能帮你图生图哦"
             )
             await self.notify(hint)
             return False, hint
@@ -158,5 +139,4 @@ class EditImageAction(BaseImageAction):
             purpose="action_edit",
             success_message="[内部：已发送图生图结果]",
             error_prefix="图生图失败",
-            output_filename=output_filename,
         )

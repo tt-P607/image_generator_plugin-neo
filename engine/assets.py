@@ -109,21 +109,26 @@ class AssetLibrary:
     def __init__(self) -> None:
         """初始化空素材池。"""
 
-        self._always_vibes: list[VibeAsset] = []
-        self._selectable_vibes: dict[str, VibeAsset] = {}
+        self._always_vibes: dict[str, list[VibeAsset]] = {}
+        self._selectable_vibes: dict[str, dict[str, VibeAsset]] = {}
         self._director_refs: dict[str, DirectorRefAsset] = {}
 
-    @property
-    def always_vibes(self) -> tuple[VibeAsset, ...]:
-        """始终注入的 Vibe 列表。"""
+    def always_vibes(self, encoding_key: str) -> tuple[VibeAsset, ...]:
+        """返回指定模型编码键的始终注入 Vibe。"""
 
-        return tuple(self._always_vibes)
+        return tuple(self._always_vibes.get(encoding_key, ()))
 
     @property
     def selectable_vibe_names(self) -> tuple[str, ...]:
         """可供 LLM 选择的 Vibe 名称。"""
 
-        return tuple(self._selectable_vibes)
+        return tuple(
+            dict.fromkeys(
+                name
+                for model_assets in self._selectable_vibes.values()
+                for name in model_assets
+            )
+        )
 
     @property
     def director_ref_names(self) -> tuple[str, ...]:
@@ -131,20 +136,28 @@ class AssetLibrary:
 
         return tuple(self._director_refs)
 
-    def select_vibes(self, names: Sequence[str]) -> tuple[VibeAsset, ...]:
+    def select_vibes(
+        self,
+        names: Sequence[str],
+        encoding_key: str,
+    ) -> tuple[VibeAsset, ...]:
         """按名称取出可选 Vibe，忽略并记录不存在的名称。
 
         Args:
             names: LLM 给出的 Vibe 名称
+            encoding_key: 当前生成模型使用的 Vibe 编码键
 
         Returns:
             命中的 Vibe 元组
         """
         selected: list[VibeAsset] = []
+        model_assets = self._selectable_vibes.get(encoding_key, {})
         for name in names:
-            asset = self._selectable_vibes.get(name)
+            asset = model_assets.get(name)
             if asset is None:
-                logger.warning(f"选择了不存在的 Vibe: {name!r}，跳过")
+                logger.warning(
+                    f"Vibe {name!r} 不含当前模型向量 {encoding_key!r}，跳过"
+                )
                 continue
             selected.append(asset)
         return tuple(selected)
@@ -197,28 +210,43 @@ class AssetLibrary:
             logger.warning("未配置 API Key，跳过素材加载")
             return
 
-        vibe_model = settings.vibe_model
-        if settings.vibe_always_enabled and vibe_model:
-            loaded = await self._load_vibes(
-                settings,
-                always_items,
-                encoder,
-                vibe_model,
-            )
-            self._always_vibes = [asset for _, asset in loaded]
-            logger.info(f"always Vibe 加载完成，共 {len(self._always_vibes)} 个")
-
-        if vibe_model:
+        vibe_models = settings.vibe_models
+        for vibe_model in vibe_models:
+            encoding_key = settings.vibe_encoding_key(vibe_model)
+            if encoding_key is None:
+                continue
+            if settings.vibe_always_enabled:
+                loaded = await self._load_vibes(
+                    settings,
+                    always_items,
+                    encoder,
+                    vibe_model,
+                )
+                self._always_vibes[encoding_key] = [asset for _, asset in loaded]
             selectable = await self._load_vibes(
                 settings,
                 selectable_items,
                 encoder,
                 vibe_model,
             )
-            self._selectable_vibes = {name: asset for name, asset in selectable}
-            logger.info(f"可选 Vibe 池加载完成，共 {len(self._selectable_vibes)} 个")
+            self._selectable_vibes[encoding_key] = {
+                name: asset for name, asset in selectable
+            }
+
+        if vibe_models:
+            always_count = len(
+                {
+                    asset.name
+                    for model_assets in self._always_vibes.values()
+                    for asset in model_assets
+                }
+            )
+            logger.info(f"always Vibe 加载完成，共 {always_count} 个")
+            logger.info(
+                f"可选 Vibe 池加载完成，共 {len(self.selectable_vibe_names)} 个"
+            )
         elif always_items or selectable_items:
-            logger.info("模型白名单中没有支持 Vibe 的 V4.5 模型，跳过 Vibe 加载")
+            logger.info("模型白名单中没有支持 Vibe 的模型，跳过 Vibe 加载")
 
         self._director_refs = self._load_director_refs(settings, director_items)
         logger.info(f"精密参考池加载完成，共 {len(self._director_refs)} 个")
@@ -254,6 +282,13 @@ class AssetLibrary:
                 vector = read_preencoded_vector(file_path, model)
                 if vector:
                     logger.info(f"已加载预编码 Vibe（不消耗 Anlas）: {item.file}")
+                elif file_path.suffix.lower() in PREENCODED_EXTENSIONS:
+                    encoding_key = resolve_model_profile(model).vibe_encoding_key
+                    logger.debug(
+                        f"预编码 Vibe 不含模型向量 {encoding_key!r}，跳过且不发起网络请求: "
+                        f"{item.file}"
+                    )
+                    continue
                 else:
                     source = read_source_image(file_path)
                     if not source:
@@ -269,6 +304,9 @@ class AssetLibrary:
                 continue
 
             name = Path(item.file).stem
+            encoding_key = resolve_model_profile(model).vibe_encoding_key
+            if encoding_key is None:
+                continue
             assets.append(
                 (
                     name,
@@ -277,6 +315,7 @@ class AssetLibrary:
                         information_extracted=item.ie,
                         strength=item.strength,
                         name=name,
+                        encoding_key=encoding_key,
                     ),
                 )
             )

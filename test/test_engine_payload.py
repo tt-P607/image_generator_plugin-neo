@@ -23,6 +23,7 @@ from image_generator_plugin_neo.engine.types import (
     VibeAsset,
 )
 from image_generator_plugin_neo.media import enhance as enhance_ops
+from image_generator_plugin_neo.media import image_ops
 
 
 def encoded_image(width: int = 832, height: int = 1216) -> str:
@@ -99,15 +100,55 @@ def test_gateway_root_normalizes_v1_suffix() -> None:
     )
 
 
-def test_official_urls_derive_from_base_url() -> None:
-    """验证 official 渠道各端点由 base_url 推导。"""
+def test_official_endpoints_target_image_host() -> None:
+    """验证 official 渠道默认配置下原生端点均指向 image.novelai.net。"""
 
     settings = make_settings(model="nai-diffusion-4-5-full")
-    assert settings.official_generate_url.endswith("/ai/generate-image")
-    assert settings.official_encode_vibe_url.endswith("/ai/encode-vibe")
-    assert settings.official_augment_url.endswith("/ai/augment-image")
-    assert settings.official_upscale_url.endswith("/ai/upscale")
-    assert settings.official_subscription_url.endswith("/user/subscription")
+    assert settings.official_generate_url == (
+        "https://image.novelai.net/ai/generate-image"
+    )
+    assert settings.official_encode_vibe_url == (
+        "https://image.novelai.net/ai/encode-vibe"
+    )
+    assert settings.official_augment_url == (
+        "https://image.novelai.net/ai/augment-image"
+    )
+    assert settings.official_upscale_url == (
+        "https://image.novelai.net/ai/upscale"
+    )
+    assert settings.official_subscription_url == (
+        "https://image.novelai.net/user/subscription"
+    )
+
+
+def test_official_urls_follow_configured_base_url() -> None:
+    """验证镜像 base_url 的域名与路径前缀被其余原生端点沿用。"""
+
+    settings = make_settings(
+        base_url="https://mirror.example/native/ai/generate-image"
+    )
+    assert settings.official_generate_url == (
+        "https://mirror.example/native/ai/generate-image"
+    )
+    assert settings.official_encode_vibe_url == (
+        "https://mirror.example/native/ai/encode-vibe"
+    )
+    assert settings.official_augment_url == (
+        "https://mirror.example/native/ai/augment-image"
+    )
+    assert settings.official_upscale_url == (
+        "https://mirror.example/native/ai/upscale"
+    )
+    assert settings.official_subscription_url == (
+        "https://mirror.example/native/user/subscription"
+    )
+
+    trailing_slash = make_settings(
+        base_url="https://mirror.example/native/ai/generate-image/"
+    )
+    assert trailing_slash.official_augment_url == (
+        "https://mirror.example/native/ai/augment-image"
+    )
 
 
 def test_upscale_payloads_match_channel_protocols() -> None:
@@ -183,7 +224,187 @@ async def test_enhance_builds_single_img2img_request_for_max() -> None:
     assert generation.seed == 0
     assert generation.noise == 0.0
     assert generation.upscaled_enhance is True
-    assert engine._run_generate.await_args.kwargs == {"prepare_img2img": False}
+    # Enhance 目标画幅不参与图生图自动压缩，调用时不带额外开关。
+    assert engine._run_generate.await_args.kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_img2img_prepares_source_before_dimension_check() -> None:
+    """验证未对齐且超限的图生图原图先缩放对齐，不再被画幅校验直接拒绝。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-full"
+    engine = ImageEngine(config)
+    engine._run_generate = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    source = encoded_image(1259, 1840)
+    result = await engine.generate(
+        GenerationSpec(
+            prompt="1girl",
+            user_id="tester",
+            width=1259,
+            height=1840,
+            source_image=source,
+            strength=0.55,
+        )
+    )
+
+    assert result.success is True
+    prepared = engine._run_generate.await_args.args[0]
+    assert (prepared.width, prepared.height) == (832, 1216)
+    assert prepared.width * prepared.height <= image_ops.FREE_TIER_MAX_PIXELS
+    assert prepared.source_image != source
+
+
+@pytest.mark.asyncio
+async def test_gateway_img2img_keeps_source_dimensions() -> None:
+    """验证 Gateway 渠道不参与免费压缩，原图画幅原样进入请求。"""
+
+    config = ImageGeneratorConfig()
+    config.api.channel = "gateway"
+    config.generation.model = "nai-diffusion-4-5-full"
+    engine = ImageEngine(config)
+    engine._run_generate = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    source = encoded_image(1216, 1216)
+    result = await engine.generate(
+        GenerationSpec(
+            prompt="1girl",
+            user_id="tester",
+            width=1216,
+            height=1216,
+            source_image=source,
+            strength=0.55,
+        )
+    )
+
+    assert result.success is True
+    prepared = engine._run_generate.await_args.args[0]
+    assert (prepared.width, prepared.height) == (1216, 1216)
+    assert prepared.source_image == source
+
+
+def _director_spec(source: str, width: int, height: int) -> DirectorToolSpec:
+    """构造测试用改表情导演工具请求。"""
+
+    return DirectorToolSpec(
+        tool_type="emotion",
+        source_image=source,
+        width=width,
+        height=height,
+        prompt="wink",
+        defry=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_official_director_compresses_source_to_free_tier() -> None:
+    """验证 official 导演工具源图先等比压缩对齐 64，不再原样发送超限画幅。"""
+
+    config = ImageGeneratorConfig()
+    config.generation.model = "nai-diffusion-5-full"
+    engine = ImageEngine(config)
+    engine._run_director = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    source = encoded_image(1785, 1920)
+    result = await engine.run_director_tool(_director_spec(source, 1785, 1920))
+
+    assert result.success is True
+    prepared = engine._run_director.await_args.args[0]
+    assert (prepared.width, prepared.height) == (960, 1024)
+    assert prepared.width % 64 == 0 and prepared.height % 64 == 0
+    assert prepared.width * prepared.height <= image_ops.FREE_TIER_MAX_PIXELS
+    assert prepared.source_image != source
+
+    body = payload_builder.build_official_director(prepared)
+    assert (body["width"], body["height"]) == (960, 1024)
+    assert body["req_type"] == "emotion"
+    assert body["prompt"] == "wink"
+
+
+@pytest.mark.asyncio
+async def test_official_director_keeps_conforming_source_untouched() -> None:
+    """验证已符合免费范围的源图与关闭压缩开关时不重编码。"""
+
+    config = ImageGeneratorConfig()
+    engine = ImageEngine(config)
+    engine._run_director = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    source = encoded_image(832, 1216)
+    await engine.run_director_tool(_director_spec(source, 832, 1216))
+    prepared = engine._run_director.await_args.args[0]
+    assert prepared.source_image == source
+    assert (prepared.width, prepared.height) == (832, 1216)
+
+    config.generation.img2img_auto_downscale = False
+    disabled = ImageEngine(config)
+    disabled._run_director = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+    disabled._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    oversized = encoded_image(1785, 1920)
+    await disabled.run_director_tool(_director_spec(oversized, 1785, 1920))
+    kept = disabled._run_director.await_args.args[0]
+    assert kept.source_image == oversized
+    assert (kept.width, kept.height) == (1785, 1920)
+
+
+@pytest.mark.asyncio
+async def test_gateway_director_keeps_source_dimensions() -> None:
+    """验证 Gateway 渠道导演工具不参与免费压缩，原图画幅原样进入请求。"""
+
+    config = ImageGeneratorConfig()
+    config.api.channel = "gateway"
+    engine = ImageEngine(config)
+    engine._run_director = AsyncMock(  # type: ignore[method-assign]
+        return_value=ImageResult.ok("edited.png")
+    )
+
+    async def submit_now(work: object) -> ImageResult:
+        """测试中立即执行队列闭包。"""
+
+        return await work()  # type: ignore[operator]
+
+    engine._submit = AsyncMock(side_effect=submit_now)  # type: ignore[method-assign]
+    source = encoded_image(1785, 1920)
+    result = await engine.run_director_tool(_director_spec(source, 1785, 1920))
+
+    assert result.success is True
+    prepared = engine._run_director.await_args.args[0]
+    assert (prepared.width, prepared.height) == (1785, 1920)
+    assert prepared.source_image == source
 
 
 @pytest.mark.asyncio
@@ -608,23 +829,27 @@ def test_vibe_asset_carries_optional_name() -> None:
     assert named.name == "日系块面厚涂概念插画风"
 
 
-def test_vibe_model_uses_supported_model_from_whitelist() -> None:
-    """验证默认 V5 时会从白名单中选择 V4.5 作为 Vibe 编码模型。"""
+def test_vibe_models_include_every_distinct_encoding_from_whitelist() -> None:
+    """验证 Vibe 模型集合不依赖白名单中 Full 与 Curated 的先后顺序。"""
 
     settings = make_settings(
         model="nai-diffusion-5-curated",
         available_models=(
             "nai-diffusion-5-curated",
+            "nai-diffusion-4-5-curated",
             "nai-diffusion-4-5-full",
         ),
     )
-    assert settings.vibe_model == "nai-diffusion-4-5-full"
+    assert settings.vibe_models == (
+        "nai-diffusion-4-5-curated",
+        "nai-diffusion-4-5-full",
+    )
 
     v5_only = make_settings(
         model="nai-diffusion-5-curated",
         available_models=("nai-diffusion-5-curated",),
     )
-    assert v5_only.vibe_model is None
+    assert v5_only.vibe_models == ()
 
 
 def test_alias_model_resolves_profile_and_keeps_request_name() -> None:

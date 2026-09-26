@@ -34,6 +34,12 @@ def test_manifest_declares_version() -> None:
     assert manifest["version"]
 
 
+def test_manifest_requires_media_send_api() -> None:
+    """声明 send_media 所需的框架发送 API 版本。"""
+    manifest = load_manifest()
+    assert manifest["api_version"]["send_api"] == "1.1.0"
+
+
 def test_manifest_declares_all_components() -> None:
     """验证 manifest 组件声明数量与类型正确。"""
 
@@ -48,6 +54,7 @@ def test_manifest_declares_all_components() -> None:
     assert sum(kind == "action" for kind, _ in declared) == 11
     assert sum(kind == "command" for kind, _ in declared) == 5
     assert sum(kind == "service" for kind, _ in declared) == 1
+    assert ("event_handler", "generated_image_context") in declared
     assert sum(kind == "router" for kind, _ in declared) == 1
     assert sum(kind == "config" for kind, _ in declared) == 1
 
@@ -108,6 +115,17 @@ def test_config_rejects_invalid_values() -> None:
     raw["generation"]["steps"] = 0
     with pytest.raises(ValidationError):
         ImageGeneratorConfig.model_validate(raw)
+
+
+def test_output_image_context_defaults_to_vlm_and_rejects_unknown_mode() -> None:
+    """注入默认关闭；启用时默认使用框架 VLM，且只接受两种注入方式。"""
+    raw = ImageGeneratorConfig().model_dump(mode="python")
+    assert raw["plugin"]["inject_generated_image"] is False
+    assert raw["plugin"]["output_image_context"] == "vlm"
+    for mode in ("placeholder", "unknown"):
+        raw["plugin"]["output_image_context"] = mode
+        with pytest.raises(ValidationError):
+            ImageGeneratorConfig.model_validate(raw)
 
 
 def test_config_enforces_generation_model_whitelist() -> None:

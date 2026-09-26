@@ -271,6 +271,14 @@ class ImageGeneratorConfig(BaseConfig):
             default=False,
             description="是否启用插件",
         )
+        inject_generated_image: bool = Field(
+            default=False,
+            description="是否让生成图片进入模型上下文；关闭时只保留带媒体 ID 的图片占位符",
+        )
+        output_image_context: Literal["vlm", "base64"] = Field(
+            default="vlm",
+            description="开启注入时的方式：vlm 由框架识别图片并附加描述（失败则用占位符），base64 将原图交给多模态模型",
+        )
 
     @config_section("components")
     class ComponentsSection(SectionBase):
@@ -338,7 +346,8 @@ class ImageGeneratorConfig(BaseConfig):
             description=(
                 "生图渠道选择，决定插件使用哪套 API 协议。端点统一由 base_url 配置。\n\n"
                 "  official（默认）\n"
-                "    直连 NovelAI 官方 API 协议，base_url 填写生图端点完整路径。\n"
+                "    直连 NovelAI 原生 API 协议，base_url 填写生图端点完整路径，\n"
+                "    其余原生端点跟随该地址推导域名与路径前缀。\n"
                 "    支持全部功能：Vibe Transfer、Director Reference、图生图、多人物坐标等。\n"
                 "    响应格式：ZIP/PNG 二进制，插件自动解压保存。\n"
                 "    示例 base_url：https://image.novelai.net/ai/generate-image\n\n"
@@ -365,6 +374,8 @@ class ImageGeneratorConfig(BaseConfig):
             description=(
                 "API 端点 URL，两种渠道均使用此字段。\n"
                 "official 渠道：填写完整的生图端点，如 https://image.novelai.net/ai/generate-image。\n"
+                "2× 放大、导演工具、Vibe 编码和订阅查询按同一域名与路径前缀推导，\n"
+                "使用镜像地址时只需填写其生图端点。\n"
                 "gateway 渠道：填写服务根地址（含或不含 /v1 均可），"
                 "如 http://127.0.0.1:31555 或 https://your-gateway.example.com/v1。"
             ),
@@ -379,15 +390,6 @@ class ImageGeneratorConfig(BaseConfig):
             ge=0,
             le=600,
             description="请求冷却时间（秒）",
-        )
-        api_base_url: str = Field(
-            default="https://api.novelai.net",
-            min_length=8,
-            pattern=r"^https?://[^\s]+$",
-            description=(
-                "Official 渠道的 API 域名（用于 upscale 等需要 api.novelai.net 的端点）。"
-                "仅在 official 渠道下生效，gateway 渠道不使用此配置。"
-            ),
         )
 
     @config_section("generation")
@@ -559,12 +561,12 @@ class ImageGeneratorConfig(BaseConfig):
         img2img_auto_downscale: bool = Field(
             default=True,
             description=(
-                "图生图时是否自动将原图等比缩放到 Opus 免费范围内（≤1024×1024 像素），"
+                "图生图与导演工具是否自动将原图等比缩放到 Opus 免费范围内（≤1024×1024 像素），"
                 "以避免消耗 Anlas。\n"
-                "开启（默认）：official 渠道图生图时，若原图尺寸超过 1M 像素，"
+                "开启（默认）：official 渠道图生图与导演工具时，若原图尺寸超过 1M 像素或宽高未对齐 64px，"
                 "自动使用 LANCZOS 算法等比缩放到不超过 1024×1024 的最大合法尺寸（对齐到 64px），"
                 "使 Opus 用户免费生成。\n"
-                "关闭：使用原图尺寸发送，超过 1M 像素时消耗 Anlas。\n"
+                "关闭：使用原图尺寸发送，超过 1M 像素时消耗 Anlas；发送超限画幅可能被上游拒绝。\n"
                 "注意：Gateway 渠道统一使用 /v1/images/generations 端点，"
                 "此配置项仅影响 official 渠道。"
             ),

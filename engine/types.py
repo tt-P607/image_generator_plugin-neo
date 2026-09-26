@@ -29,12 +29,14 @@ class VibeAsset:
         information_extracted: 信息提取量（0.0–1.0）
         strength: 参考强度（0.0–1.0）
         name: 来源文件名（不含后缀），用于日志与状态展示
+        encoding_key: 向量适用的 NovelAI 模型编码键
     """
 
     data: str
     information_extracted: float
     strength: float
     name: str = ""
+    encoding_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,10 +258,22 @@ class UserVibeStore:
         """追加一个 Vibe，返回是否成功与当前数量。"""
 
         loaded = self.entries.setdefault(user_id, [])
-        if len(loaded) >= limit:
-            return False, len(loaded)
+        named_assets = {item.name for item in loaded if item.name}
+        count = len(named_assets) + sum(not item.name for item in loaded)
+        if asset.name:
+            for index, current in enumerate(loaded):
+                if (
+                    current.name == asset.name
+                    and current.encoding_key == asset.encoding_key
+                ):
+                    loaded[index] = asset
+                    return True, count
+            if asset.name not in named_assets and count >= limit:
+                return False, count
+        elif count >= limit:
+            return False, count
         loaded.append(asset)
-        return True, len(loaded)
+        return True, count + (asset.name not in named_assets)
 
     def clear(self, user_id: str) -> None:
         """清空指定用户的 Vibe。"""

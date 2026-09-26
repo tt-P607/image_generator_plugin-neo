@@ -1,6 +1,6 @@
 """生成结果的本地落盘。
 
-统一处理 ZIP 解包、字节写入与自定义文件名重命名。
+统一处理 ZIP 解包与图片字节写入。
 """
 
 from __future__ import annotations
@@ -76,34 +76,6 @@ def save_base64_image(b64_data: str, target_dir: Path) -> Path:
     """
     raw = base64.b64decode(image_ops.strip_data_url_prefix(b64_data))
     return save_image_bytes(raw, target_dir)
-
-
-def rename_with_stem(path: Path, stem: str) -> Path:
-    """将图片改名为指定主干名，重名时追加序号。
-
-    Args:
-        path: 当前文件路径
-        stem: 目标主干名（调用方需保证已做字符净化）
-
-    Returns:
-        重命名后的路径；重命名失败时返回原路径
-    """
-    if not stem:
-        return path
-
-    target = path.parent / f"{stem}.png"
-    suffix = 2
-    while target.exists():
-        target = path.parent / f"{stem}_{suffix}.png"
-        suffix += 1
-
-    try:
-        path.rename(target)
-    except OSError as error:
-        logger.warning(f"重命名图片失败，保留原文件名: {error}")
-        return path
-    logger.info(f"图片已重命名为: {target}")
-    return target
 
 
 def read_image_base64(path: Path, *, strip_metadata: bool = False) -> str:

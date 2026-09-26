@@ -282,6 +282,15 @@ class ImageEngine:
                 f"模型 {effective_model!r} 不支持字段 variety_plus（当前为 True）"
             )
 
+        # 图生图原图先缩放对齐，画幅校验针对最终发送的尺寸。
+        if spec.is_img2img:
+            try:
+                spec = self._prepare_img2img(spec)
+            except ValueError as error:
+                return ImageResult.failure(
+                    f"模型 {effective_model!r} 的请求素材无效：{error}"
+                )
+
         dimension_error = _dimension_error(
             effective_model,
             spec.width,
@@ -409,9 +418,7 @@ class ImageEngine:
             model=spec.model,
             from_command=spec.from_command,
         )
-        return await self._submit(
-            lambda: self._run_generate(generation, prepare_img2img=False)
-        )
+        return await self._submit(lambda: self._run_generate(generation))
 
     async def inpaint(self, spec: InpaintSpec) -> ImageResult:
         """执行局部重绘。
@@ -524,6 +531,7 @@ class ImageEngine:
             return ImageResult.failure(
                 f"Director Tool 字段 defry 不合法（当前为 {spec.defry!r}，要求 0~5）"
             )
+        spec = self._prepare_director_source(spec)
         return await self._submit(lambda: self._run_director(spec))
 
     async def upscale(
@@ -618,13 +626,12 @@ class ImageEngine:
 
     # ── 内部执行 ──
 
-    async def _run_generate(
-        self,
-        spec: GenerationSpec,
-        *,
-        prepare_img2img: bool = True,
-    ) -> ImageResult:
-        """在队列内执行一次生图。"""
+    async def _run_generate(self, spec: GenerationSpec) -> ImageResult:
+        """在队列内执行一次生图。
+
+        图生图的缩放对齐已由 ``generate()`` 在校验画幅前完成；Enhance
+        的目标画幅由官网倍率决定，超出免费上限也原样发送。
+        """
 
         await self._queue.wait_for_cooldown()
         api_key = self._current_key()
@@ -638,11 +645,10 @@ class ImageEngine:
         if self._settings.is_gateway:
             return await self._run_gateway_generate(spec, vibes, api_key, target_dir)
 
-        prepared = self._prepare_img2img(spec) if prepare_img2img else spec
         body = payload_builder.build_official_generation(
             self._settings,
-            prepared,
-            () if prepared.director_refs else vibes,
+            spec,
+            () if spec.director_refs else vibes,
         )
         raw = await self._http.post_binary(
             self._settings.official_generate_url,
@@ -813,7 +819,9 @@ class ImageEngine:
         return ImageResult.ok(str(storage.save_response_payload(raw, target_dir)))
 
     def _prepare_img2img(self, spec: GenerationSpec) -> GenerationSpec:
-        """official 渠道图生图时按需缩放原图到免费像素范围并对齐 64。
+        """图生图时按需缩放原图到免费像素范围并对齐 64。
+
+        仅 official 渠道生效：Gateway 使用统一端点，画幅按请求体原样传递。
 
         Args:
             spec: 原始请求描述
@@ -822,6 +830,8 @@ class ImageEngine:
             可能已替换原图与画幅的请求描述
         """
         if not spec.is_img2img or not spec.source_image:
+            return spec
+        if self._settings.is_gateway:
             return spec
         if not self._settings.img2img_auto_downscale:
             return spec
@@ -844,6 +854,39 @@ class ImageEngine:
             height=new_height,
         )
 
+    def _prepare_director_source(self, spec: DirectorToolSpec) -> DirectorToolSpec:
+        """导演工具源图按需缩放原图到免费像素范围并对齐 64。
+
+        与图生图共用同一压缩策略，否则超大或未对齐的源图会被上游拒绝。
+        仅 official 渠道生效：Gateway 使用统一端点，画幅按请求体原样传递。
+
+        Args:
+            spec: 原始请求描述
+
+        Returns:
+            可能已替换源图与画幅的请求描述
+        """
+        if self._settings.is_gateway:
+            return spec
+        if not self._settings.img2img_auto_downscale:
+            return spec
+
+        scaled, new_width, new_height = image_ops.downscale_to_free_tier(
+            spec.source_image
+        )
+        if (new_width, new_height) == (spec.width, spec.height):
+            return spec
+        logger.info(
+            f"导演工具源图自动缩放: {spec.width}x{spec.height} → "
+            f"{new_width}x{new_height}"
+        )
+        return replace(
+            spec,
+            source_image=scaled,
+            width=new_width,
+            height=new_height,
+        )
+
     def _collect_vibes(self, spec: GenerationSpec) -> tuple[VibeAsset, ...]:
         """汇总本次生图需要注入的 Vibe。
 
@@ -856,15 +899,22 @@ class ImageEngine:
             always + LLM 自选 + 用户手动加载的 Vibe
         """
         effective_model = spec.model or self._settings.model
-        if not self._settings.model_profile(effective_model).supports_vibe:
+        encoding_key = self._settings.vibe_encoding_key(effective_model)
+        if encoding_key is None:
             return ()
 
         collected: list[VibeAsset] = []
         if self._settings.vibe_always_enabled:
-            collected.extend(self._assets.always_vibes)
+            collected.extend(self._assets.always_vibes(encoding_key))
         if self._settings.vibe_selectable_enabled and spec.selected_vibe_names:
-            collected.extend(self._assets.select_vibes(spec.selected_vibe_names))
-        collected.extend(self._user_vibes.get(spec.user_id))
+            collected.extend(
+                self._assets.select_vibes(spec.selected_vibe_names, encoding_key)
+            )
+        collected.extend(
+            asset
+            for asset in self._user_vibes.get(spec.user_id)
+            if not asset.encoding_key or asset.encoding_key == encoding_key
+        )
         if collected:
             logger.info(
                 "本次注入 Vibe: "
@@ -988,11 +1038,12 @@ class ImageEngine:
         if not loaded:
             return "当前未加载任何 Vibe"
 
-        lines = [f"当前已加载 {len(loaded)} 个 Vibe:"]
+        visible = list({asset.name: asset for asset in loaded}.values())
+        lines = [f"当前已加载 {len(visible)} 个 Vibe:"]
         lines.extend(
             f"{index}. {asset.name or '未命名'} | IE:{asset.information_extracted}, "
             f"Str:{asset.strength}"
-            for index, asset in enumerate(loaded, start=1)
+            for index, asset in enumerate(visible, start=1)
         )
         return "\n".join(lines)
 
@@ -1040,38 +1091,55 @@ class ImageEngine:
         if storage_dir.resolve() not in file_path.parents:
             return False, "Vibe 文件路径越界"
 
+        vibe_models = self._settings.vibe_models
+        if not vibe_models:
+            return False, "当前模型白名单中没有支持 Vibe 的模型"
+
+        assets: list[VibeAsset] = []
         try:
             source = asset_lib.read_source_image(file_path)
+            if (
+                not source
+                and file_path.suffix.lower() not in asset_lib.PREENCODED_EXTENSIONS
+            ):
+                return False, "文件数据无效或未找到 image 字段"
+            for vibe_model in vibe_models:
+                encoding_key = self._settings.vibe_encoding_key(vibe_model)
+                if encoding_key is None:
+                    continue
+                vector = asset_lib.read_preencoded_vector(file_path, vibe_model)
+                if vector is None and file_path.suffix.lower() not in asset_lib.PREENCODED_EXTENSIONS:
+                    vector = await self._encode_vibe(
+                        source,
+                        DEFAULT_MANUAL_VIBE_IE,
+                        vibe_model,
+                    )
+                if vector:
+                    assets.append(
+                        VibeAsset(
+                            data=vector,
+                            information_extracted=DEFAULT_MANUAL_VIBE_IE,
+                            strength=DEFAULT_MANUAL_VIBE_STRENGTH,
+                            name=Path(resolved).stem,
+                            encoding_key=encoding_key,
+                        )
+                    )
         except (OSError, ValueError) as error:
             return False, f"读取素材失败: {error}"
-        if not source:
-            return False, "文件数据无效或未找到 image 字段"
+        if not assets:
+            return False, "文件不含当前可用模型的 Vibe 编码"
 
-        vibe_model = self._settings.vibe_model
-        if vibe_model is None:
-            return False, "当前模型白名单中没有支持 Vibe 的 V4.5 模型"
-
-        vector = asset_lib.read_preencoded_vector(file_path, vibe_model)
-        if not vector:
-            vector = await self._encode_vibe(
-                source,
-                DEFAULT_MANUAL_VIBE_IE,
-                vibe_model,
+        count = 0
+        for asset in assets:
+            added, count = self._user_vibes.add(
+                user_id,
+                asset,
+                self._settings.max_vibes,
             )
-        if not vector:
-            return False, "Vibe 编码失败，请检查 API Key 和网络连接"
-
-        asset = VibeAsset(
-            data=vector,
-            information_extracted=DEFAULT_MANUAL_VIBE_IE,
-            strength=DEFAULT_MANUAL_VIBE_STRENGTH,
-            name=Path(resolved).stem,
-        )
-        added, count = self._user_vibes.add(user_id, asset, self._settings.max_vibes)
-        if not added:
-            return False, f"最多同时叠加 {self._settings.max_vibes} 个 Vibe"
+            if not added:
+                return False, f"最多同时叠加 {self._settings.max_vibes} 个 Vibe"
 
         return True, (
             f"已添加【{resolved}】\n"
-            f"{count}. IE:{asset.information_extracted}, Str:{asset.strength}"
+            f"{count}. IE:{DEFAULT_MANUAL_VIBE_IE}, Str:{DEFAULT_MANUAL_VIBE_STRENGTH}"
         )

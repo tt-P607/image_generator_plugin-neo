@@ -40,8 +40,10 @@ api_keys = ["pst-xxxxxxxx"]
 
 ```toml
 base_url = "https://image.novelai.net/ai/generate-image"
-api_base_url = "https://api.novelai.net"
 ```
+
+除生图外的原生端点（`/ai/upscale`、`/ai/augment-image`、`/ai/encode-vibe`、
+`/user/subscription`）由 `base_url` 推导域名与路径前缀。
 
 ### gateway
 

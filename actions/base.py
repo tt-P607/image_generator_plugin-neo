@@ -6,19 +6,20 @@
 
 from __future__ import annotations
 
-import re
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.app.plugin_system.api.send_api import send_image, send_text
+from src.app.plugin_system.api.media_api import get_media_info
+from src.app.plugin_system.api.send_api import send_text
 from src.app.plugin_system.base import BaseAction
 
 from .. import background
 from ..config import ImageGeneratorConfig
 from ..engine import ImageEngine, ImageResult
 from ..engine import storage
-from ..media import extract_image_by_media_id, extract_image_from_stream
+from ..media import extract_image_by_media_id, extract_image_from_stream, send_generated_image
 
 if TYPE_CHECKING:
     from ..plugin import ImageGeneratorPlugin
@@ -27,22 +28,6 @@ logger = get_logger("image_generator_plugin.action")
 
 VALID_RESOLUTIONS = {(1216, 832), (832, 1216), (1024, 1024)}
 FALLBACK_RESOLUTION = (1024, 1024)
-FILENAME_SAFE_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
-
-
-def sanitize_filename_stem(raw: str) -> str:
-    """把用户或模型给出的文件名净化为安全主干名。
-
-    Args:
-        raw: 原始文件名，可能含扩展名和非法字符
-
-    Returns:
-        仅含英文、数字、下划线与连字符的主干名，无有效字符时返回空串
-    """
-    stem = Path(raw.strip()).stem
-    return FILENAME_SAFE_PATTERN.sub("_", stem).strip("_")
-
-
 class BaseImageAction(BaseAction):
     """图片 Action 基类。
 
@@ -80,61 +65,27 @@ class BaseImageAction(BaseAction):
 
     async def resolve_source_image(
         self,
-        filename: str,
         media_id: str = "",
     ) -> str | None:
-        """按媒体 ID 或文件名解析待处理图片。
+        """按媒体 ID 解析待处理图片。
 
         media_id（上下文 ``[图片(media_id)]`` 占位符中的哈希）优先，
-        其次按产图文件名加载；两者都不提供时回退到最近消息中的图片。
+        未提供时回退到最近消息中的图片。
 
         Args:
-            filename: Bot 自己生成的图片文件名，可为空
             media_id: 上下文占位符中的媒体 ID（SHA256 哈希），可为空
 
         Returns:
             图片 base64，未找到时返回 None
         """
         if media_id.strip():
-            loaded = await extract_image_by_media_id(media_id)
+            loaded = await extract_image_by_media_id(media_id.strip())
             if loaded is not None:
                 return loaded
             logger.warning(f"media_id={media_id} 取图失败")
             return None
 
-        if filename.strip():
-            loaded = self._load_generated_image(filename)
-            if loaded is not None:
-                return loaded
-            return None
         return await extract_image_from_stream(self.chat_stream)
-
-    def _load_generated_image(self, filename: str) -> str | None:
-        """从产图目录按文件名加载图片。
-
-        Args:
-            filename: 图片文件名，可省略扩展名
-
-        Returns:
-            图片 base64，未找到时返回 None
-        """
-        engine = self.engine
-        if engine is None:
-            return None
-
-        stem = sanitize_filename_stem(filename)
-        if not stem:
-            return None
-
-        settings = engine.settings
-        for directory in (settings.temp_dir, settings.command_images_dir):
-            candidate = directory / f"{stem}.png"
-            if candidate.is_file():
-                logger.info(f"通过文件名加载图片: {candidate}")
-                return storage.read_image_base64(candidate)
-
-        logger.warning(f"文件名 {filename!r} 在产图目录中未找到")
-        return None
 
     def parse_resolution(self, resolution: str, default: str) -> tuple[int, int]:
         """解析画幅字符串，非法值按配置与默认值依次回退。
@@ -165,9 +116,8 @@ class BaseImageAction(BaseAction):
         purpose: str,
         success_message: str,
         error_prefix: str,
-        output_filename: str = "",
     ) -> tuple[bool, str]:
-        """在后台执行图片任务，成功后发送图片并返回文件名。
+        """在后台执行图片任务，成功后发送图片并返回媒体 ID。
 
         等待被取消时任务仍会跑完，并把失败信息补偿发送给用户。
 
@@ -177,7 +127,6 @@ class BaseImageAction(BaseAction):
             purpose: 任务用途标识
             success_message: 成功时返回给模型的消息
             error_prefix: 失败消息前缀
-            output_filename: 自定义输出文件名，留空表示沿用随机名
 
         Returns:
             (是否成功, 面向模型的消息)
@@ -187,8 +136,8 @@ class BaseImageAction(BaseAction):
         async def _execute() -> tuple[bool, str]:
             result = await work()
             results = result if isinstance(result, tuple) else (result,)
-            output_paths: list[Path] = []
-            for index, image_result in enumerate(results, start=1):
+            media_ids: list[str] = []
+            for image_result in results:
                 if not image_result.success or image_result.path is None:
                     logger.error(f"{error_prefix}: {image_result.message}")
                     message = f"{error_prefix}: {image_result.message}"
@@ -197,23 +146,17 @@ class BaseImageAction(BaseAction):
                     return False, message
 
                 path = Path(image_result.path)
-                stem = sanitize_filename_stem(output_filename)
-                if stem:
-                    numbered_stem = stem if len(results) == 1 else f"{stem}_{index}"
-                    path = storage.rename_with_stem(path, numbered_stem)
-
-                sent, send_message = await self._send_image(path)
+                sent, media_id_or_error = await self._send_image(path)
                 if not sent:
                     if detached["value"]:
                         await send_text(
-                            send_message,
+                            media_id_or_error,
                             stream_id=self.chat_stream.stream_id,
                         )
-                    return False, send_message
-                output_paths.append(path)
+                    return False, media_id_or_error
+                media_ids.append(media_id_or_error)
 
-            filenames = ", ".join(path.name for path in output_paths)
-            return True, f"{success_message}（文件名: {filenames}）"
+            return True, f"{success_message}（media_id: {', '.join(media_ids)}）"
 
         try:
             return await background.run_shielded(
@@ -235,7 +178,7 @@ class BaseImageAction(BaseAction):
             path: 图片路径
 
         Returns:
-            (是否成功, 失败说明)
+            (是否成功, 媒体 ID 或失败说明)
         """
         strip_metadata = self.plugin_config.generation.strip_metadata_action
         try:
@@ -244,9 +187,20 @@ class BaseImageAction(BaseAction):
             logger.error(f"读取图片失败: {error}", exc_info=True)
             return False, f"读取图片失败: {error}"
 
-        await send_image(image_b64, stream_id=self.chat_stream.stream_id)
+        sent = await send_generated_image(
+            image_b64,
+            stream_id=self.chat_stream.stream_id,
+            mode=self.plugin_config.plugin.output_image_context,
+            inject_into_context=self.plugin_config.plugin.inject_generated_image,
+        )
+        if not sent:
+            return False, "图片发送失败"
+        media_id = hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
+        info = await get_media_info(media_id)
+        if info is None or info.get("image_id") != media_id or not info.get("path"):
+            return False, "图片已发送，但媒体缓存不可回查，无法通过 media_id 引用"
         logger.info(f"图片已发送: {path.name}")
-        return True, ""
+        return True, media_id
 
     async def notify(self, message: str) -> None:
         """向当前聊天流发送一条提示文本。

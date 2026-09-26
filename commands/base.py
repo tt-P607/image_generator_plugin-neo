@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, cast
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.app.plugin_system.api.send_api import send_image, send_text
+from src.app.plugin_system.api.send_api import send_text
 from src.app.plugin_system.base import BaseCommand
 from src.app.plugin_system.types import PermissionLevel
 
 from .. import background
 from ..engine import ImageEngine, ImageResult
 from ..engine import storage
+from ..media import send_generated_image
 from . import replies
 
 if TYPE_CHECKING:
@@ -189,7 +190,16 @@ class BaseImageCommand(BaseCommand):
                         stream_id=stream_id,
                     )
                     return
-                await send_image(image_b64, stream_id=stream_id, reply_to=reply_to)
+                sent = await send_generated_image(
+                    image_b64,
+                    stream_id=stream_id,
+                    mode=self.image_plugin.image_config.plugin.output_image_context,
+                    reply_to=reply_to,
+                    inject_into_context=self.image_plugin.image_config.plugin.inject_generated_image,
+                )
+                if not sent:
+                    await send_text("图片发送失败", stream_id=stream_id)
+                    return
             await send_text(
                 replies.pick(success_hints, success_key),
                 stream_id=stream_id,

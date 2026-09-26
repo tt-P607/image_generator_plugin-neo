@@ -21,18 +21,16 @@ class UpscaleAction(BaseImageAction):
 
     async def execute(
         self,
-        media_id: Annotated[str, "用户图片的媒体 ID。"] = "",
-        image_filename: Annotated[str, "Bot 已生成图片的文件名。"] = "",
-        output_filename: Annotated[str, "放大结果文件名，不含扩展名。"] = "",
+        media_id: Annotated[str, "用户图片占位符或 Bot 出图 Action 返回的媒体 ID。"] = "",
     ) -> tuple[bool, str]:
         """执行固定 2× 放大。"""
 
         engine = self.engine
         if engine is None:
             return False, "图片生成服务不可用"
-        source = await self.resolve_source_image(image_filename, media_id)
+        source = await self.resolve_source_image(media_id)
         if not source:
-            return False, "需要提供 media_id 或 image_filename 才能放大图片"
+            return False, "需要提供 media_id 才能放大图片"
 
         async def _work() -> ImageResult:
             return await engine.upscale(source)
@@ -43,5 +41,4 @@ class UpscaleAction(BaseImageAction):
             purpose="action_upscale",
             success_message="[内部：已发送固定 2× 放大结果]",
             error_prefix="图片放大失败",
-            output_filename=output_filename,
         )

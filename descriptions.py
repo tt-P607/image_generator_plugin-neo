@@ -223,15 +223,12 @@ def _multi_character_block(config: ImageGeneratorConfig) -> str:
     )
 
 
-def _composition_and_filename_block() -> str:
-    """构建画幅与文件名规范。"""
+def _composition_block() -> str:
+    """构建画幅与生成结果引用说明。"""
     return (
-        "**7. 构图画幅与文件命名**\n"
+        "**7. 构图画幅与图片引用**\n"
         "  - 画幅尺寸：人物竖图 832x1216，风景横图 1216x832，方形 1024x1024\n"
-        "  - 文件名规范（output_filename，必填）：\n"
-        "    每次出图必须指定文件名，仅英文/数字/下划线，不含扩展名。\n"
-        "    命名建议：内容描述_序号，如 character_portrait_01、landscape_sunset_02。\n"
-        "    出图成功后返回值包含实际文件名，后续 inpaint_image / director_tool 可通过此文件名引用。"
+        "  - 出图成功后返回媒体 ID（media_id）；后续编辑、局部重绘或导演工具直接传入该 ID。"
     )
 
 
@@ -371,7 +368,7 @@ def build_draw_description(config: ImageGeneratorConfig) -> str:
         _character_naming_block(),
         _all_model_specific_blocks(config),
         _multi_character_block(config),
-        _composition_and_filename_block(),
+        _composition_block(),
         _style_block(config),
         _negative_block(config),
         _character_block(config),

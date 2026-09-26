@@ -23,6 +23,11 @@
 config/plugins/image_generator_plugin-neo/config.toml
 ```
 
+生成图片默认只在聊天上下文保留带媒体 ID 的占位符。需要模型看到图片时，在
+`[plugin]` 中开启 `inject_generated_image = true`；`output_image_context` 默认为
+`"vlm"`，由框架识别图片并附加描述，识别失败时保留占位符。设为 `"base64"` 则将
+原图交给多模态模型。关闭开关时不执行图片识别，也不内联原图。
+
 至少需要配置一个 NovelAI Token：
 
 ```toml
@@ -36,8 +41,10 @@ api_keys = ["pst-xxxxxxxx"]
 [api]
 channel = "official"
 base_url = "https://image.novelai.net/ai/generate-image"
-api_base_url = "https://api.novelai.net"
 ```
+
+除生图外的原生端点（2× 放大、导演工具、Vibe 编码、订阅查询）由 `base_url`
+推导域名与路径前缀，因此使用镜像地址时只需填写其生图端点。
 
 ### 使用 NovelAI Gateway
 

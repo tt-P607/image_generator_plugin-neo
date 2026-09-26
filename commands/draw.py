@@ -365,7 +365,10 @@ class ImageReferenceCommand(BaseImageCommand):
             negative_prompt=negative_prompt,
             scale=scale_flags.scale,
             cfg_rescale=scale_flags.cfg_rescale,
-            model=generation_flags.model or engine.settings.vibe_model,
+            model=(
+                generation_flags.model
+                or next(iter(engine.settings.vibe_models), None)
+            ),
             steps=generation_flags.steps,
             variety_plus=generation_flags.variety_plus,
             render_text=generation_flags.render_text,
