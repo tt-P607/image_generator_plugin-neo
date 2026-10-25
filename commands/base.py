@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, cast
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.app.plugin_system.api.send_api import send_text
+from src.app.plugin_system.api.send_api import format_send_result, send_text_result
 from src.app.plugin_system.base import BaseCommand
 from src.app.plugin_system.types import PermissionLevel
 
 from .. import background
 from ..engine import ImageEngine, ImageResult
 from ..engine import storage
-from ..media import send_generated_image
+from ..media import send_generated_image_result
 from . import replies
 
 if TYPE_CHECKING:
@@ -126,7 +126,10 @@ class BaseImageCommand(BaseCommand):
         Args:
             message: 文本内容
         """
-        await send_text(message, stream_id=self.stream_id)
+        result = await send_text_result(message, stream_id=self.stream_id)
+        sent, receipt = format_send_result(result, "命令通知已发送")
+        if not sent or receipt != "命令通知已发送":
+            logger.warning(f"图片命令通知状态: {receipt}")
 
     async def run_generation(
         self,
@@ -158,23 +161,21 @@ class BaseImageCommand(BaseCommand):
                 result = await work()
             except Exception as error:  # noqa: BLE001 - 后台任务需兜底避免静默丢失
                 logger.error(f"后台出图任务异常: {error}", exc_info=True)
-                await send_text(
+                await self.reply(
                     replies.pick(replies.GENERATE_ERROR_HINTS, "gen_error").format(
                         error=replies.humanize_error(str(error))
-                    ),
-                    stream_id=stream_id,
+                    )
                 )
                 return
 
             results = result if isinstance(result, tuple) else (result,)
             for image_result in results:
                 if not image_result.success or image_result.path is None:
-                    await send_text(
+                    await self.reply(
                         replies.pick(
                             replies.GENERATE_ERROR_HINTS,
                             "gen_error",
-                        ).format(error=replies.humanize_error(image_result.message)),
-                        stream_id=stream_id,
+                        ).format(error=replies.humanize_error(image_result.message))
                     )
                     return
                 try:
@@ -183,27 +184,29 @@ class BaseImageCommand(BaseCommand):
                         strip_metadata=strip_metadata,
                     )
                 except (OSError, ValueError) as error:
-                    await send_text(
+                    await self.reply(
                         replies.pick(replies.ERROR_HINTS, "error").format(
                             error=replies.humanize_error(str(error))
-                        ),
-                        stream_id=stream_id,
+                        )
                     )
                     return
-                sent = await send_generated_image(
+                send_result = await send_generated_image_result(
                     image_b64,
                     stream_id=stream_id,
                     mode=self.image_plugin.image_config.plugin.output_image_context,
                     reply_to=reply_to,
-                    inject_into_context=self.image_plugin.image_config.plugin.inject_generated_image,
+                    inject_into_context=self.image_plugin.image_config.plugin.should_inject_generated_image(
+                        self._message.chat_type if self._message is not None else "",
+                    ),
                 )
+                sent, receipt = format_send_result(send_result, "图片已发送")
                 if not sent:
-                    await send_text("图片发送失败", stream_id=stream_id)
+                    logger.warning(f"图片命令发送状态: {receipt}")
+                    await self.reply("图片发送未确认")
                     return
-            await send_text(
-                replies.pick(success_hints, success_key),
-                stream_id=stream_id,
-            )
+                if receipt != "图片已发送":
+                    logger.warning(f"图片命令本地后处理状态: {receipt}")
+            await self.reply(replies.pick(success_hints, success_key))
 
         task = background.spawn(
             self.image_plugin,

@@ -12,14 +12,18 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.api.media_api import get_media_info
-from src.app.plugin_system.api.send_api import send_text
-from src.app.plugin_system.base import BaseAction
+from src.app.plugin_system.api.send_api import format_send_result, send_text_result
+from src.app.plugin_system.base import BaseAction, PlatformSendStatus
 
 from .. import background
 from ..config import ImageGeneratorConfig
 from ..engine import ImageEngine, ImageResult
 from ..engine import storage
-from ..media import extract_image_by_media_id, extract_image_from_stream, send_generated_image
+from ..media import (
+    extract_image_by_media_id,
+    extract_image_from_stream,
+    send_generated_image_result,
+)
 
 if TYPE_CHECKING:
     from ..plugin import ImageGeneratorPlugin
@@ -137,26 +141,39 @@ class BaseImageAction(BaseAction):
             result = await work()
             results = result if isinstance(result, tuple) else (result,)
             media_ids: list[str] = []
+            postprocess_warnings: list[str] = []
             for image_result in results:
                 if not image_result.success or image_result.path is None:
                     logger.error(f"{error_prefix}: {image_result.message}")
                     message = f"{error_prefix}: {image_result.message}"
                     if detached["value"]:
-                        await send_text(message, stream_id=self.chat_stream.stream_id)
+                        await self.notify(message)
                     return False, message
 
                 path = Path(image_result.path)
                 sent, media_id_or_error = await self._send_image(path)
                 if not sent:
                     if detached["value"]:
-                        await send_text(
-                            media_id_or_error,
+                        logger.warning(f"图片发送状态: {media_id_or_error}")
+                        await send_text_result(
+                            "图片未能确认发送，请检查平台状态后再试。",
                             stream_id=self.chat_stream.stream_id,
                         )
                     return False, media_id_or_error
-                media_ids.append(media_id_or_error)
+                if len(media_id_or_error) == 64 and all(
+                    character in "0123456789abcdef" for character in media_id_or_error
+                ):
+                    media_ids.append(media_id_or_error)
+                else:
+                    postprocess_warnings.append(media_id_or_error)
 
-            return True, f"{success_message}（media_id: {', '.join(media_ids)}）"
+            message = (
+                f"{success_message}（media_id: {', '.join(media_ids)}）"
+                if media_ids else success_message
+            )
+            if postprocess_warnings:
+                message = f"{message}；本地后处理提示：" + "；".join(postprocess_warnings)
+            return True, message
 
         try:
             return await background.run_shielded(
@@ -187,19 +204,29 @@ class BaseImageAction(BaseAction):
             logger.error(f"读取图片失败: {error}", exc_info=True)
             return False, f"读取图片失败: {error}"
 
-        sent = await send_generated_image(
+        send_result = await send_generated_image_result(
             image_b64,
             stream_id=self.chat_stream.stream_id,
             mode=self.plugin_config.plugin.output_image_context,
-            inject_into_context=self.plugin_config.plugin.inject_generated_image,
+            inject_into_context=self.plugin_config.plugin.should_inject_generated_image(
+                self.chat_stream.chat_type,
+            ),
         )
+        sent, receipt = format_send_result(send_result, "图片已发送")
         if not sent:
-            return False, "图片发送失败"
+            return False, receipt
+        if send_result.status is not PlatformSendStatus.SENT:
+            return False, receipt
         media_id = hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
-        info = await get_media_info(media_id)
+        try:
+            info = await get_media_info(media_id)
+        except Exception as error:
+            return True, f"{receipt}；但读取媒体缓存时失败：{error}"
         if info is None or info.get("image_id") != media_id or not info.get("path"):
-            return False, "图片已发送，但媒体缓存不可回查，无法通过 media_id 引用"
+            return True, f"{receipt}，但媒体缓存不可回查，无法通过 media_id 引用"
         logger.info(f"图片已发送: {path.name}")
+        if receipt != "图片已发送":
+            return True, f"{media_id}；{receipt}"
         return True, media_id
 
     async def notify(self, message: str) -> None:
@@ -208,7 +235,10 @@ class BaseImageAction(BaseAction):
         Args:
             message: 提示内容
         """
-        await send_text(message, stream_id=self.chat_stream.stream_id)
+        result = await send_text_result(message, stream_id=self.chat_stream.stream_id)
+        sent, receipt = format_send_result(result, "通知已发送")
+        if not sent or receipt != "通知已发送":
+            logger.warning(f"图片任务通知发送状态: {receipt}")
 
     @property
     def triggering_user_id(self) -> str:

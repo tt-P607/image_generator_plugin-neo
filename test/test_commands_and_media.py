@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from PIL import Image, PngImagePlugin
 
+from src.core.components.types import PlatformSendResult, PlatformSendStatus
 from src.core.managers.media_manager import MediaManager
 
 from image_generator_plugin_neo.commands import parsing
@@ -29,8 +30,9 @@ from image_generator_plugin_neo.actions.edit import EditImageAction
 from image_generator_plugin_neo.actions.enhance import EnhanceAction
 from image_generator_plugin_neo.actions.inpaint import InpaintAction
 from image_generator_plugin_neo.actions.upscale import UpscaleAction
+from image_generator_plugin_neo.commands.base import BaseImageCommand
 from image_generator_plugin_neo.descriptions import build_draw_description
-from image_generator_plugin_neo.engine import assets
+from image_generator_plugin_neo.engine import ImageResult, assets
 from image_generator_plugin_neo.engine.settings import EngineSettings
 from image_generator_plugin_neo.generated_image_context import GeneratedImageContextHandler
 from image_generator_plugin_neo.media import extract_image_by_media_id, image_ops
@@ -73,7 +75,7 @@ async def test_send_generated_image_uses_media_context_mode(
     clean_pending_images: dict[str, list[str]],
 ) -> None:
     """关闭注入时只保留占位符，开启后按所选模式发送。"""
-    with patch.object(media, "send_media", new_callable=AsyncMock, return_value=True) as send:
+    with patch.object(media, "send_media_result", new_callable=AsyncMock, return_value=PlatformSendResult(True)) as send:
         assert await media.send_generated_image(
             "image-data", "stream", mode, inject_into_context=inject_into_context,
         )
@@ -236,24 +238,29 @@ async def test_generated_image_context_cleared_when_mode_disabled(
 
 
 @pytest.mark.asyncio
-async def test_generated_image_vlm_error_falls_back_to_placeholder() -> None:
-    """框架识别抛出异常时，图片仅以占位符发送一次。"""
+async def test_generated_image_vlm_error_is_not_retried() -> None:
+    """发送或识别结果异常时不以其他模式自动重复下发图片。"""
     with patch.object(
-        media, "send_media", new_callable=AsyncMock,
-        side_effect=[RuntimeError("VLM unavailable"), True],
+        media, "send_media_result", new_callable=AsyncMock,
+        side_effect=[RuntimeError("VLM unavailable"), PlatformSendResult(True)],
     ) as send:
-        assert await media.send_generated_image(
-            "image-data", "stream", "vlm", inject_into_context=True,
-        )
-    assert [call.kwargs["context_mode"] for call in send.await_args_list] == [
-        "description", "placeholder",
-    ]
+        with pytest.raises(RuntimeError, match="VLM unavailable"):
+            await media.send_generated_image(
+                "image-data", "stream", "vlm", inject_into_context=True,
+            )
+    send.assert_awaited_once_with(
+        "image", "image-data", stream_id="stream", reply_to=None,
+        context_mode="description",
+    )
 
 
 @pytest.mark.asyncio
 async def test_generated_image_failed_send_is_not_retried() -> None:
     """平台发图失败不当作识别错误重复发送。"""
-    with patch.object(media, "send_media", new_callable=AsyncMock, return_value=False) as send:
+    with patch.object(
+        media, "send_media_result", new_callable=AsyncMock,
+        return_value=PlatformSendResult(False, error="platform rejected", status=PlatformSendStatus.FAILED),
+    ) as send:
         assert not await media.send_generated_image(
             "image-data", "stream", "vlm", inject_into_context=True,
         )
@@ -261,21 +268,99 @@ async def test_generated_image_failed_send_is_not_retried() -> None:
 
 
 @pytest.mark.asyncio
-async def test_action_sends_using_configured_context_mode(tmp_path: Path) -> None:
-    """Action 入口透传插件模式，发图失败不会报告成功。"""
+@pytest.mark.parametrize("status", [PlatformSendStatus.UNKNOWN, PlatformSendStatus.INTERCEPTED])
+async def test_generated_image_only_queues_confirmed_native_send(
+    status: PlatformSendStatus,
+    clean_pending_images: dict[str, list[str]],
+) -> None:
+    """未确认或被拦截的原图不能进入后续模型上下文。"""
+    result = PlatformSendResult(False, error="not sent", status=status)
+    with patch.object(media, "send_media_result", new_callable=AsyncMock, return_value=result):
+        returned = await media.send_generated_image_result(
+            "image-data", "stream", "base64", inject_into_context=True,
+        )
+
+    assert returned is result
+    assert clean_pending_images.get("stream", []) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_type", "group", "private", "expected"),
+    [
+        ("group", True, False, True),
+        ("private", True, False, False),
+        ("group", False, True, False),
+        ("private", False, True, True),
+    ],
+)
+async def test_action_sends_using_configured_context_mode(
+    tmp_path: Path, chat_type: str, group: bool, private: bool, expected: bool,
+) -> None:
+    """Action 入口按群聊和私聊开关选择上下文模式，发图失败不会报告成功。"""
     config = ImageGeneratorConfig()
     config.plugin.output_image_context = "base64"
     config.plugin.inject_generated_image = True
+    config.plugin.inject_generated_image_group = group
+    config.plugin.inject_generated_image_private = private
     action = cast(BaseImageAction, SimpleNamespace(
-        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream", chat_type=chat_type),
     ))
     with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value="aGVsbG8="), \
-         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=False) as send:
+         patch("image_generator_plugin_neo.actions.base.send_generated_image_result", new_callable=AsyncMock, return_value=PlatformSendResult(False, error="platform rejected", status=PlatformSendStatus.FAILED)) as send:
         result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
 
-    assert result == (False, "图片发送失败")
+    assert result == (False, "发送失败：platform rejected")
     send.assert_awaited_once_with(
-        "aGVsbG8=", stream_id="stream", mode="base64", inject_into_context=True,
+        "aGVsbG8=", stream_id="stream", mode="base64", inject_into_context=expected,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_type", "group", "private", "expected"),
+    [
+        ("group", True, False, True),
+        ("private", True, False, False),
+        ("group", False, True, False),
+        ("private", False, True, True),
+    ],
+)
+async def test_command_sends_using_chat_scope(
+    tmp_path: Path, chat_type: str, group: bool, private: bool, expected: bool,
+) -> None:
+    """命令发图按消息的聊天类型选择是否注入上下文。"""
+    config = ImageGeneratorConfig()
+    config.plugin.inject_generated_image = True
+    config.plugin.inject_generated_image_group = group
+    config.plugin.inject_generated_image_private = private
+    command = cast(BaseImageCommand, SimpleNamespace(
+        image_plugin=SimpleNamespace(image_config=config),
+        stream_id="stream", message_id="", _message=SimpleNamespace(chat_type=chat_type),
+        reply=AsyncMock(),
+    ))
+    submitted: list[Awaitable[None]] = []
+
+    def capture_spawn(plugin: object, coro: Awaitable[None], **options: object) -> object:
+        submitted.append(coro)
+        return object()
+
+    async def work() -> ImageResult:
+        return ImageResult.ok(str(tmp_path / "generated.png"))
+
+    with patch("image_generator_plugin_neo.commands.base.background.spawn", new=capture_spawn), \
+         patch("image_generator_plugin_neo.commands.base.storage.read_image_base64", return_value="aGVsbG8="), \
+         patch("image_generator_plugin_neo.commands.base.send_generated_image_result", new_callable=AsyncMock, return_value=PlatformSendResult(True)) as send, \
+         patch("image_generator_plugin_neo.commands.base.send_text_result", new_callable=AsyncMock, return_value=PlatformSendResult(True)):
+        assert await BaseImageCommand.run_generation(
+            command, work, task_name="draw", purpose="draw", success_hints=["已完成"], success_key="draw",
+        ) == (True, "图片生成任务已提交")
+        await submitted[0]
+
+    command.reply.assert_awaited_once_with("已完成")
+    send.assert_awaited_once_with(
+        "aGVsbG8=", stream_id="stream", mode="vlm", reply_to=None,
+        inject_into_context=expected,
     )
 
 
@@ -284,12 +369,12 @@ async def test_action_returns_cached_media_id(tmp_path: Path) -> None:
     """Action 返回发送内容的媒体 ID，并确认图片可在媒体库回查。"""
     config = ImageGeneratorConfig()
     action = cast(BaseImageAction, SimpleNamespace(
-        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream", chat_type="private"),
     ))
     image_b64 = "aGVsbG8="
     media_id = hashlib.sha256(image_b64.encode("utf-8")).hexdigest()
     with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value=image_b64), \
-         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=True), \
+         patch("image_generator_plugin_neo.actions.base.send_generated_image_result", new_callable=AsyncMock, return_value=PlatformSendResult(True)), \
          patch("image_generator_plugin_neo.actions.base.get_media_info", new_callable=AsyncMock, return_value={"image_id": media_id, "path": "cached.png"}) as get_info:
         result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
 
@@ -299,17 +384,17 @@ async def test_action_returns_cached_media_id(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_action_rejects_uncached_sent_image(tmp_path: Path) -> None:
-    """平台发图成功但缓存缺失时，不返回无法使用的媒体 ID。"""
+    """平台发图成功但缓存缺失时保留已送达状态并指出本地限制。"""
     config = ImageGeneratorConfig()
     action = cast(BaseImageAction, SimpleNamespace(
-        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream"),
+        plugin_config=config, chat_stream=SimpleNamespace(stream_id="stream", chat_type="private"),
     ))
     with patch("image_generator_plugin_neo.actions.base.storage.read_image_base64", return_value="aGVsbG8="), \
-         patch("image_generator_plugin_neo.actions.base.send_generated_image", new_callable=AsyncMock, return_value=True), \
+         patch("image_generator_plugin_neo.actions.base.send_generated_image_result", new_callable=AsyncMock, return_value=PlatformSendResult(True)), \
          patch("image_generator_plugin_neo.actions.base.get_media_info", new_callable=AsyncMock, return_value=None):
         result = await BaseImageAction._send_image(action, tmp_path / "generated.png")
 
-    assert result[0] is False
+    assert result[0] is True
     assert "缓存不可回查" in result[1]
 
 
@@ -318,7 +403,8 @@ async def test_action_returns_all_media_ids_without_renaming(tmp_path: Path) -> 
     """多张图片逐张发送并返回对应 ID，保持引擎生成的本地文件名。"""
     first = tmp_path / "first.png"
     second = tmp_path / "second.png"
-    send_image = AsyncMock(side_effect=[(True, "first-id"), (True, "second-id")])
+    first_id, second_id = "a" * 64, "b" * 64
+    send_image = AsyncMock(side_effect=[(True, first_id), (True, second_id)])
     action = cast(BaseImageAction, SimpleNamespace(
         image_plugin=object(), chat_stream=SimpleNamespace(stream_id="stream"),
         _send_image=send_image,
@@ -341,7 +427,7 @@ async def test_action_returns_all_media_ids_without_renaming(tmp_path: Path) -> 
         )
 
     assert success is True
-    assert message == "已发送（media_id: first-id, second-id）"
+    assert message == f"已发送（media_id: {first_id}, {second_id}）"
     assert "first.png" not in message
     assert send_image.await_args_list[0].args == (first,)
     assert send_image.await_args_list[1].args == (second,)

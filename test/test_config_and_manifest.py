@@ -37,7 +37,7 @@ def test_manifest_declares_version() -> None:
 def test_manifest_requires_media_send_api() -> None:
     """声明 send_media 所需的框架发送 API 版本。"""
     manifest = load_manifest()
-    assert manifest["api_version"]["send_api"] == "1.1.0"
+    assert manifest["api_version"]["send_api"] == "1.3.0"
 
 
 def test_manifest_declares_all_components() -> None:
@@ -121,11 +121,35 @@ def test_output_image_context_defaults_to_vlm_and_rejects_unknown_mode() -> None
     """注入默认关闭；启用时默认使用框架 VLM，且只接受两种注入方式。"""
     raw = ImageGeneratorConfig().model_dump(mode="python")
     assert raw["plugin"]["inject_generated_image"] is False
+    assert raw["plugin"]["inject_generated_image_group"] is True
+    assert raw["plugin"]["inject_generated_image_private"] is True
     assert raw["plugin"]["output_image_context"] == "vlm"
     for mode in ("placeholder", "unknown"):
         raw["plugin"]["output_image_context"] = mode
         with pytest.raises(ValidationError):
             ImageGeneratorConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("chat_type", "group", "private", "expected"),
+    [
+        ("group", True, False, True),
+        ("private", True, False, False),
+        ("group", False, True, False),
+        ("private", False, True, True),
+        ("discuss", True, True, False),
+    ],
+)
+def test_generated_image_context_follows_chat_scope(
+    chat_type: str, group: bool, private: bool, expected: bool,
+) -> None:
+    """生成图上下文注入由总开关及当前聊天范围共同决定。"""
+    config = ImageGeneratorConfig().plugin
+    config.inject_generated_image_group = group
+    config.inject_generated_image_private = private
+    assert config.should_inject_generated_image(chat_type) is False
+    config.inject_generated_image = True
+    assert config.should_inject_generated_image(chat_type) is expected
 
 
 def test_config_enforces_generation_model_whitelist() -> None:

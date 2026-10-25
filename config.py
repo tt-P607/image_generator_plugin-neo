@@ -275,10 +275,28 @@ class ImageGeneratorConfig(BaseConfig):
             default=False,
             description="是否让生成图片进入模型上下文；关闭时只保留带媒体 ID 的图片占位符",
         )
+        inject_generated_image_group: bool = Field(
+            default=True,
+            description="是否在群聊中将生成图片注入上下文；关闭时只保留图片占位符",
+        )
+        inject_generated_image_private: bool = Field(
+            default=True,
+            description="是否在私聊中将生成图片注入上下文；关闭时只保留图片占位符",
+        )
         output_image_context: Literal["vlm", "base64"] = Field(
             default="vlm",
             description="开启注入时的方式：vlm 由框架识别图片并附加描述（失败则用占位符），base64 将原图交给多模态模型",
         )
+
+        def should_inject_generated_image(self, chat_type: str) -> bool:
+            """按聊天类型与总开关判断是否将生成图片注入上下文。"""
+            if not self.inject_generated_image:
+                return False
+            if chat_type == "group":
+                return self.inject_generated_image_group
+            if chat_type == "private":
+                return self.inject_generated_image_private
+            return False
 
     @config_section("components")
     class ComponentsSection(SectionBase):
